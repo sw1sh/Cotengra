@@ -1,0 +1,27 @@
+[package]
+name = "cotengra"
+version = "0.1.0"
+authors = ["Johnnie Gray <johnniemcgray@gmail.com>"]
+edition = "2018"
+
+[lib]
+name = "cotengra"
+crate-type = ["cdylib"]
+
+[dependencies]
+bit-set = "0.5"
+ordered-float = "3.9"
+rand = "0.8"
+rustc-hash = "1.1"
+wolfram-library-link = {path = "/root/wolfram-library-link-rs/wolfram-library-link"}
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+
+[profile.dev]
+codegen-units = 1
+lto = true
+opt-level = 3
+
