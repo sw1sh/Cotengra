@@ -12,17 +12,14 @@ defaults:
     shell: bash
 
 jobs:
-  linux:
-    name: Linux (${{ matrix.target }}) WSTP
+  linux-x86_64:
+    name: Linux x86_64 (native, WSTP)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
     container:
       image: wolframresearch/wolframengine:latest
       options: --user root
     env:
+      TARGET: x86_64-unknown-linux-gnu
       WOLFRAM_SYSTEM_ID: Linux-x86-64
     steps:
       - name: Install prerequisites
@@ -30,48 +27,21 @@ jobs:
           set -euxo pipefail
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y bash curl ca-certificates git build-essential pkg-config uuid-dev
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            dpkg --add-architecture arm64
-            apt-get update || true
-            # Core cross toolchain & libs (best-effort; tolerate failures to inspect later)
-            DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu || true
-            DEBIAN_FRONTEND=noninteractive apt-get install -y libuuid1:arm64 uuid-dev:arm64 libstdc++-12-dev:arm64 || true
-          fi
-          echo "Checking host uuid libraries:"; ls -1 /usr/lib/x86_64-linux-gnu/libuuid* || true
-          ldconfig -p | grep -i uuid || true
+          ls -1 /usr/lib/x86_64-linux-gnu/libuuid* || true
       - name: Locate Wolfram Engine / DeveloperKit
         run: |
           set -euo pipefail
           if command -v WolframKernel >/dev/null 2>&1; then
             KERNEL=$(readlink -f "$(command -v WolframKernel)")
-            EXEC_DIR=$(dirname "$KERNEL")
-            ENGINE_ROOT=$(dirname "$EXEC_DIR")
-            echo "Detected WolframKernel: $KERNEL"
+            EXEC_DIR=$(dirname "$KERNEL"); ENGINE_ROOT=$(dirname "$EXEC_DIR")
             echo "WOLFRAM_APP_DIRECTORY=$ENGINE_ROOT" >> $GITHUB_ENV
-            DEVKIT_BASE="$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit"
-            echo "Listing DeveloperKit contents:"; find "$DEVKIT_BASE" -maxdepth 3 -type d -name CompilerAdditions || true
-            # Prefer architecture-specific CompilerAdditions if present
-            if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-              ARM_DIR=$(find "$DEVKIT_BASE" -maxdepth 4 -type d -path '*Linux-ARM64*/*/CompilerAdditions' -print -quit 2>/dev/null || true)
-              if [ -n "$ARM_DIR" ]; then
-                echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$ARM_DIR" >> $GITHUB_ENV
-                echo "Using ARM64 CompilerAdditions: $ARM_DIR"
-              fi
-            fi
-            if [ -z "${WSTP_COMPILER_ADDITIONS_DIRECTORY:-}" ]; then
-              GEN_DIR=$(find "$DEVKIT_BASE" -maxdepth 4 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
-              if [ -n "$GEN_DIR" ]; then
-                echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$GEN_DIR" >> $GITHUB_ENV
-                echo "Using generic CompilerAdditions: $GEN_DIR"
-              else
-                echo "WARNING: No CompilerAdditions directory found." >&2
-              fi
-            fi
+            DEVKIT_DIR=$(find "$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit" -maxdepth 4 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
+            [ -n "$DEVKIT_DIR" ] && echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$DEVKIT_DIR" >> $GITHUB_ENV || echo "WARN: no CompilerAdditions"
           else
-            echo "WolframKernel not found in PATH; wstp-sys may fail" >&2
+            echo "ERROR: WolframKernel not in PATH" >&2
           fi
       - uses: actions/checkout@v4
-      - name: Install Rust (stable)
+      - name: Install Rust
         env:
           RUSTUP_HOME: /root/.rustup
           CARGO_HOME: /root/.cargo
@@ -79,16 +49,9 @@ jobs:
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           . /root/.cargo/env
-          rustup toolchain install stable
           rustup default stable
-          rustup target add ${{ matrix.target }}
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            mkdir -p .cargo
-            printf '%s\n%s\n' '[target.aarch64-unknown-linux-gnu]' 'linker = "aarch64-linux-gnu-gcc"' > .cargo/config.toml
-            cat .cargo/config.toml
-          fi
+          rustup target add $TARGET
           rustup show
-          cargo --version
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -96,26 +59,85 @@ jobs:
             /root/.cargo/registry
             /root/.cargo/git
             target
-          key: linux-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: linux-${{ env.TARGET }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build
-        env:
-          CARGO_HOME: /root/.cargo
-          RUSTUP_HOME: /root/.rustup
         run: |
           set -euo pipefail
           . /root/.cargo/env
-          echo "Active toolchain:"; rustup show active-toolchain || true
-          rustup target list --installed
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            echo "Listing aarch64 cross toolchain binaries:"; ls -1 /usr/bin/aarch64-linux-gnu-* 2>/dev/null | head -n 30 || true
-          fi
-          cargo build --release --target ${{ matrix.target }}
-          echo "Built artifacts:"; ls -1 target/${{ matrix.target }}/release || true
+          cargo build --release --target $TARGET
+          ls -1 target/$TARGET/release || true
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cotengra-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/*cotengra*.*
+          name: cotengra-${{ env.TARGET }}
+          path: target/${{ env.TARGET }}/release/*cotengra*.*
+
+  linux-arm64:
+    name: Linux ARM64 (native, WSTP)
+    # GitHub-hosted arm runner; adjust label if using another variant
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: wolframresearch/wolframengine:latest
+      options: --user root
+    env:
+      TARGET: aarch64-unknown-linux-gnu
+      WOLFRAM_SYSTEM_ID: Linux-ARM64
+    steps:
+      - name: Verify architecture
+        run: uname -m
+      - name: Install prerequisites
+        run: |
+          set -euxo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y bash curl ca-certificates git build-essential pkg-config uuid-dev
+          # ARM uuid libs
+          ls -1 /usr/lib/*/libuuid* || true
+      - name: Locate Wolfram Engine / DeveloperKit
+        run: |
+          set -euo pipefail
+          if command -v WolframKernel >/dev/null 2>&1; then
+            KERNEL=$(readlink -f "$(command -v WolframKernel)")
+            EXEC_DIR=$(dirname "$KERNEL"); ENGINE_ROOT=$(dirname "$EXEC_DIR")
+            echo "WOLFRAM_APP_DIRECTORY=$ENGINE_ROOT" >> $GITHUB_ENV
+            DEVKIT_DIR=$(find "$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit" -maxdepth 5 -type d -path '*Linux-ARM64*/*/CompilerAdditions' -print -quit 2>/dev/null || true)
+            if [ -z "$DEVKIT_DIR" ]; then
+              DEVKIT_DIR=$(find "$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit" -maxdepth 5 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
+            fi
+            [ -n "$DEVKIT_DIR" ] && echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$DEVKIT_DIR" >> $GITHUB_ENV || echo "WARN: no ARM64 CompilerAdditions"
+          else
+            echo "ERROR: WolframKernel not in PATH" >&2
+          fi
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        env:
+          RUSTUP_HOME: /root/.rustup
+          CARGO_HOME: /root/.cargo
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          . /root/.cargo/env
+          rustup default stable
+          rustup target add $TARGET
+          rustup show
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+            target
+          key: linux-${{ env.TARGET }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: |
+          set -euo pipefail
+          . /root/.cargo/env
+          cargo build --release --target $TARGET
+          ls -1 target/$TARGET/release || true
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cotengra-${{ env.TARGET }}
+          path: target/${{ env.TARGET }}/release/*cotengra*.*
 
   # macOS builds still require a Wolfram installation for WSTP; placeholder job (currently skipped)
   macos:
@@ -151,7 +173,7 @@ jobs:
   publish:
     name: Publish (manual)
     if: github.event_name == 'workflow_dispatch'
-    needs: [linux]
+    needs: [linux-x86_64, linux-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +186,7 @@ jobs:
 
   package-paclet:
     name: Package Paclet (Linux x86_64 + ARM64)
-    needs: linux
+    needs: [linux-x86_64, linux-arm64]
     runs-on: ubuntu-latest
     container:
       image: wolframresearch/wolframengine:latest
