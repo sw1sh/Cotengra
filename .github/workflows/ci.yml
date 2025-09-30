@@ -171,6 +171,8 @@ jobs:
           target: Build
           check: false
           paclet_cicd_version: 0.36.0
+          definition_notebook: ./Cotengra/ResourceDefinition.nb
+          resource_system_base: https://www.wolframcloud.com/obj/resourcesystem/api/1.0
       - name: Locate Paclet File
         id: locate_paclet
         run: |
