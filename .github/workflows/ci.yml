@@ -175,16 +175,16 @@ jobs:
         id: locate_paclet
         run: |
           set -euo pipefail
-          # Prefer action-provided path if exposed
-          if [ -n "${PACLET_PATH:-}" ] && [ -f "$PACLET_PATH" ]; then
-            echo "Found paclet via PACLET_PATH=$PACLET_PATH"
-            echo "paclet_path=$PACLET_PATH" >> $GITHUB_OUTPUT
-            exit 0
+          if [ -z "${PACLET_PATH:-}" ]; then
+            echo "PACLET_PATH not set; build-paclet action should export PACLET_PATH." >&2
+            exit 1
           fi
-          FOUND=$(find . -maxdepth 6 -type f -name 'Cotengra*.paclet' | head -n1 || true)
-          if [ -z "$FOUND" ]; then echo "No .paclet file found" >&2; exit 1; fi
-          echo "Found paclet at $FOUND"
-          echo "paclet_path=$FOUND" >> $GITHUB_OUTPUT
+          if [ ! -f "$PACLET_PATH" ]; then
+            echo "PACLET_PATH is set to '$PACLET_PATH' but file does not exist." >&2
+            exit 1
+          fi
+          echo "Using paclet at $PACLET_PATH"
+          echo "paclet_path=$PACLET_PATH" >> $GITHUB_OUTPUT
       - name: Upload Paclet Artifact
         uses: actions/upload-artifact@v4
         with:
