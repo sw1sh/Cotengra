@@ -106,4 +106,51 @@ jobs:
           path: dist
       - name: List artifacts
         run: ls -R dist
+
+  package-paclet:
+    name: Package Paclet (Linux libs)
+    needs: linux-container
+    runs-on: ubuntu-latest
+    container:
+      image: wolframresearch/wolframengine:latest
+      options: --user root
+    env:
+      WOLFRAM_SYSTEM_ID: Linux-x86-64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble LibraryResources
+        run: |
+          set -euo pipefail
+          mkdir -p Cotengra/LibraryResources/Linux-x86-64
+          mkdir -p Cotengra/LibraryResources/Linux-ARM64
+          # Copy built shared objects into Paclet layout if available
+          X64_LIB=$(find artifacts -type f -path '*/cotengra-x86_64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
+          ARM64_LIB=$(find artifacts -type f -path '*/cotengra-aarch64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
+          if [ -n "$X64_LIB" ]; then cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/; fi
+          if [ -n "$ARM64_LIB" ]; then cp "$ARM64_LIB" Cotengra/LibraryResources/Linux-ARM64/; fi
+          echo "Contents of LibraryResources:"; find Cotengra/LibraryResources -maxdepth 3 -type f || true
+      - name: Build Paclet
+        id: build_paclet
+        run: |
+          wolframscript -code 'Get["PacletTools`"]; path = PacletBuild["Cotengra", "OutputDirectory"->"build/paclet"]; Print["PACLET_PATH=", path];' | tee build_paclet.log
+          PACLET_PATH=$(grep 'PACLET_PATH=' build_paclet.log | sed 's/.*PACLET_PATH=//')
+          echo "paclet_path=$PACLET_PATH" >> $GITHUB_OUTPUT
+      - name: Upload Paclet Artifact
+        uses: actions/upload-artifact@v4
+        with:
+            name: cotengra-paclet
+            path: ${{ steps.build_paclet.outputs.paclet_path }}
+      - name: Upload to Wolfram Cloud (optional)
+        env:
+          PACLET_PATH: ${{ steps.build_paclet.outputs.paclet_path }}
+          WOLFRAM_CLOUD_USER: $WOLFRAM_CLOUD_USER
+          WOLFRAM_CLOUD_PASSWORD: $WOLFRAM_CLOUD_PASSWORD
+        run: |
+          if [ -z "$WOLFRAM_CLOUD_USER" ] || [ -z "$WOLFRAM_CLOUD_PASSWORD" ]; then
+            echo "Cloud credentials not provided; skipping upload."; exit 0; fi
+          wolframscript -code "CloudConnect[\"$WOLFRAM_CLOUD_USER\", \"$WOLFRAM_CLOUD_PASSWORD\"]; CopyFile[\"$PACLET_PATH\", CloudObject[\"Cotengra.paclet\", Permissions->\"Public\"], OverwriteTarget->True]; Print[\"Uploaded paclet to Wolfram Cloud.\"];"
         
