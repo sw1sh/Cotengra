@@ -76,76 +76,6 @@ jobs:
           name: cotengra-${{ env.TARGET }}
           path: target/${{ env.TARGET }}/release/*cotengra*.*
 
-  linux-arm64:
-    name: Linux ARM64 (native, WSTP)
-    # GitHub-hosted arm runner; adjust label if using another variant
-    runs-on: ubuntu-24.04-arm
-    container:
-      image: wolframresearch/wolframengine:latest
-      options: --user root
-    env:
-      TARGET: aarch64-unknown-linux-gnu
-      WOLFRAM_SYSTEM_ID: Linux-ARM64
-      RUSTUP_HOME: /root/.rustup
-      CARGO_HOME: /root/.cargo
-    steps:
-      - name: Verify architecture
-        run: uname -m
-      - name: Install prerequisites
-        run: |
-          set -euxo pipefail
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y bash curl ca-certificates git build-essential pkg-config uuid-dev
-          # ARM uuid libs
-          ls -1 /usr/lib/*/libuuid* || true
-      - name: Locate Wolfram Engine / DeveloperKit
-        run: |
-          set -euo pipefail
-          if command -v WolframKernel >/dev/null 2>&1; then
-            KERNEL=$(readlink -f "$(command -v WolframKernel)")
-            EXEC_DIR=$(dirname "$KERNEL"); ENGINE_ROOT=$(dirname "$EXEC_DIR")
-            echo "WOLFRAM_APP_DIRECTORY=$ENGINE_ROOT" >> $GITHUB_ENV
-            DEVKIT_DIR=$(find "$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit" -maxdepth 5 -type d -path '*Linux-ARM64*/*/CompilerAdditions' -print -quit 2>/dev/null || true)
-            if [ -z "$DEVKIT_DIR" ]; then
-              DEVKIT_DIR=$(find "$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit" -maxdepth 5 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
-            fi
-            [ -n "$DEVKIT_DIR" ] && echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$DEVKIT_DIR" >> $GITHUB_ENV || echo "WARN: no ARM64 CompilerAdditions"
-          else
-            echo "ERROR: WolframKernel not in PATH" >&2
-          fi
-      - uses: actions/checkout@v4
-      - name: Install Rust
-        run: |
-          set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-          . /root/.cargo/env
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add $TARGET
-          echo "Installed toolchains:"; rustup toolchain list
-          rustup show active-toolchain
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            /root/.cargo/registry
-            /root/.cargo/git
-            target
-          key: linux-${{ env.TARGET }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build
-        run: |
-          set -euo pipefail
-          . /root/.cargo/env || true
-          rustup show active-toolchain || { echo 'No active toolchain; setting stable'; rustup default stable; }
-          rustup target list --installed || true
-          cargo --version || { echo 'Cargo missing; aborting'; exit 1; }
-          cargo build --release --target $TARGET
-          ls -1 target/$TARGET/release || true
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cotengra-${{ env.TARGET }}
-          path: target/${{ env.TARGET }}/release/*cotengra*.*
 
   # macOS builds still require a Wolfram installation for WSTP; placeholder job (currently skipped)
   macos:
@@ -181,7 +111,7 @@ jobs:
   publish:
     name: Publish (manual)
     if: github.event_name == 'workflow_dispatch'
-    needs: [linux-x86_64, linux-arm64]
+    needs: [linux-x86_64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -193,8 +123,8 @@ jobs:
         run: ls -R dist
 
   package-paclet:
-    name: Package Paclet (Linux x86_64 + ARM64)
-    needs: [linux-x86_64, linux-arm64]
+    name: Package Paclet (Linux x86_64)
+    needs: [linux-x86_64]
     runs-on: ubuntu-latest
     container:
       image: wolframresearch/wolframengine:latest
@@ -210,11 +140,14 @@ jobs:
       - name: Assemble LibraryResources
         run: |
           set -euo pipefail
-          mkdir -p Cotengra/LibraryResources/Linux-x86-64 Cotengra/LibraryResources/Linux-ARM64
+          mkdir -p Cotengra/LibraryResources/Linux-x86-64
           X64_LIB=$(find artifacts -type f -path '*/cotengra-x86_64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
-          ARM64_LIB=$(find artifacts -type f -path '*/cotengra-aarch64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
-          if [ -n "$X64_LIB" ]; then cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/; echo "Copied x86_64 lib"; fi
-          if [ -n "$ARM64_LIB" ]; then cp "$ARM64_LIB" Cotengra/LibraryResources/Linux-ARM64/; echo "Copied ARM64 lib"; else echo "NOTE: No ARM64 lib found (build may have failed)."; fi
+          if [ -n "$X64_LIB" ]; then
+            cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/
+            echo "Copied x86_64 lib"
+          else
+            echo "ERROR: x86_64 libcotengra.so not found in artifacts" >&2
+          fi
           echo "Preserving any pre-existing LibraryResources (e.g. MacOSX-*) committed in repo."
           echo "Contents of LibraryResources:"; find Cotengra/LibraryResources -maxdepth 3 -type f || true
       - name: Archive LibraryResources
