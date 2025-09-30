@@ -152,7 +152,8 @@ impl ContractionProcessor {
                         indmap.insert(ind, c);
                         edges.insert(c, std::iter::once(i as Node).collect());
                         appearances.push(1);
-                        sizes.push(f32::log(size_dict[&ind] as f32, 2.0));
+                        // use natural log so all accumulated costs live in same log space
+                        sizes.push(size_dict[&ind].ln());
                         legs.push((c, 1));
                         c += 1;
                     }
@@ -274,26 +275,29 @@ impl ContractionProcessor {
     /// combine and remove all scalars
     fn simplify_scalars(&mut self) {
         let mut scalars = Vec::new();
-        let mut j: Option<Node> = None;
-        let mut jndim: usize = 0;
+        let mut smallest_non_scalar: Option<Node> = None;
+        let mut smallest_ndim: usize = usize::MAX;
         for (i, legs) in self.nodes.iter() {
             let ndim = legs.len();
             if ndim == 0 {
                 scalars.push(*i);
-            } else {
-                // also search for smallest other term to multiply into
-                if j.is_none() || ndim < jndim {
-                    j = Some(*i);
-                    jndim = ndim;
-                }
+            } else if ndim < smallest_ndim {
+                smallest_non_scalar = Some(*i);
+                smallest_ndim = ndim;
             }
         }
-        if scalars.len() > 0 {
-            for p in 0..scalars.len() - 1 {
-                let i = scalars[p];
-                let j = scalars[p + 1];
-                let k = self.contract_nodes(i, j);
-                scalars[p + 1] = k;
+        if scalars.is_empty() {
+            return;
+        }
+        // chain all scalars into a single scalar (if >1)
+        let mut acc = scalars[0];
+        for s in scalars.iter().skip(1) {
+            acc = self.contract_nodes(acc, *s);
+        }
+        // multiply resulting scalar into the smallest non-scalar term if any
+        if let Some(target) = smallest_non_scalar {
+            if self.nodes.contains_key(&acc) && self.nodes.contains_key(&target) {
+                self.contract_nodes(acc, target);
             }
         }
     }
