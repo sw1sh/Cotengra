@@ -32,12 +32,17 @@ jobs:
           RUSTUP_HOME: /root/.rustup
           CARGO_HOME: /root/.cargo
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           . /root/.cargo/env
+          # Explicitly (re)install stable to be safe and show toolchains
+          rustup toolchain install stable
           rustup default stable
-          rustup show
-          cargo --version
           rustup target add ${{ matrix.target }}
+          echo "Toolchains installed:"; ls -1 /root/.rustup/toolchains || true
+          rustup show
+          which cargo
+          cargo --version
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then \
             mkdir -p .cargo; \
             echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml; \
@@ -53,8 +58,14 @@ jobs:
       - name: Build
         env:
           CARGO_HOME: /root/.cargo
+          RUSTUP_HOME: /root/.rustup
         run: |
+          set -euo pipefail
           . /root/.cargo/env
+          echo "Active toolchain:"; rustup show active-toolchain || true
+          rustup --version || true
+            # List targets to confirm installation
+          rustup target list --installed
           cargo build --release --target ${{ matrix.target }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
