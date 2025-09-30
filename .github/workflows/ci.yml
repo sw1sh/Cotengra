@@ -21,6 +21,8 @@ jobs:
     env:
       TARGET: x86_64-unknown-linux-gnu
       WOLFRAM_SYSTEM_ID: Linux-x86-64
+      RUSTUP_HOME: /root/.rustup
+      CARGO_HOME: /root/.cargo
     steps:
       - name: Install prerequisites
         run: |
@@ -42,16 +44,15 @@ jobs:
           fi
       - uses: actions/checkout@v4
       - name: Install Rust
-        env:
-          RUSTUP_HOME: /root/.rustup
-          CARGO_HOME: /root/.cargo
         run: |
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           . /root/.cargo/env
+          rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add $TARGET
-          rustup show
+          echo "Installed toolchains:"; rustup toolchain list
+          rustup show active-toolchain
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -63,7 +64,10 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          . /root/.cargo/env
+          . /root/.cargo/env || true
+          rustup show active-toolchain || { echo 'No active toolchain; setting stable'; rustup default stable; }
+          rustup target list --installed || true
+          cargo --version || { echo 'Cargo missing; aborting'; exit 1; }
           cargo build --release --target $TARGET
           ls -1 target/$TARGET/release || true
       - name: Upload artifact
@@ -82,6 +86,8 @@ jobs:
     env:
       TARGET: aarch64-unknown-linux-gnu
       WOLFRAM_SYSTEM_ID: Linux-ARM64
+      RUSTUP_HOME: /root/.rustup
+      CARGO_HOME: /root/.cargo
     steps:
       - name: Verify architecture
         run: uname -m
@@ -109,16 +115,15 @@ jobs:
           fi
       - uses: actions/checkout@v4
       - name: Install Rust
-        env:
-          RUSTUP_HOME: /root/.rustup
-          CARGO_HOME: /root/.cargo
         run: |
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           . /root/.cargo/env
+          rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add $TARGET
-          rustup show
+          echo "Installed toolchains:"; rustup toolchain list
+          rustup show active-toolchain
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -130,7 +135,10 @@ jobs:
       - name: Build
         run: |
           set -euo pipefail
-          . /root/.cargo/env
+          . /root/.cargo/env || true
+          rustup show active-toolchain || { echo 'No active toolchain; setting stable'; rustup default stable; }
+          rustup target list --installed || true
+          cargo --version || { echo 'Cargo missing; aborting'; exit 1; }
           cargo build --release --target $TARGET
           ls -1 target/$TARGET/release || true
       - name: Upload artifact
