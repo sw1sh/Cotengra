@@ -4,6 +4,6 @@ Paclet[
     "WolframVersion" -> "13.3+",
     "Extensions" -> {
         {"Kernel", "Root" -> "Kernel", "Context" -> "Cotengra`"},
-        {"LibraryLink"}
+        {"LibraryResources"}
     }
 ]
