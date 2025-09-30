@@ -8,78 +8,92 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build (matrix)
-    runs-on: ${{ matrix.os }}
+  linux-container:
+    name: Linux (wolframengine container)
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: macos-13  # Intel mac
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    container:
+      image: wolframresearch/wolframengine:latest
+      options: --user root
+    env:
+      # Hints for discovery if needed; container should already have an engine.
+      WOLFRAM_SYSTEM_ID: Linux-x86-64
     steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update
+          apt-get install -y curl ca-certificates git build-essential pkg-config gcc-aarch64-linux-gnu || true
       - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install Rust (rustup)
+        env:
+          RUSTUP_HOME: /root/.rustup
+          CARGO_HOME: /root/.cargo
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          . /root/.cargo/env
+          rustup target add ${{ matrix.target }}
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then \
+            mkdir -p .cargo; \
+            echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml; \
+          fi
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /root/.cargo/registry
+            /root/.cargo/git
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Install cross deps (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          echo '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"' >> .cargo/config.toml
+          key: linux-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_HOME: /root/.cargo
+        run: |
+          . /root/.cargo/env
+          cargo build --release --target ${{ matrix.target }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cotengra-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/*cotengra*.*
 
+  # macOS builds still require a Wolfram installation for WSTP; placeholder job (currently skipped)
+  macos:
+    if: false  # TODO: enable after adding Wolfram Engine install or making WSTP optional
+    name: macOS (pending Wolfram install)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    steps:
+      - run: echo "macOS build temporarily disabled"
+
+  # Windows builds likewise disabled until engine strategy decided
+  windows:
+    if: false
+    name: Windows (pending Wolfram install)
+    runs-on: windows-latest
+    steps:
+      - run: echo "Windows build temporarily disabled"
+
   universal-macos:
+    if: false  # disabled until macOS builds are re-enabled
     name: Create universal macOS dylib
-    needs: build
+    needs: macos
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Download macOS artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-      - name: Create universal binary
-        run: |
-          mkdir -p dist
-          LIPO_INPUTS="$(find artifacts -name 'libcotengra.dylib' -maxdepth 4)"
-          echo "Inputs: $LIPO_INPUTS"
-          lipo -create $LIPO_INPUTS -output dist/libcotengra_universal.dylib
-      - name: Upload universal binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: cotengra-macos-universal
-          path: dist/libcotengra_universal.dylib
+      - run: echo "Universal macOS build disabled"
 
   publish:
     name: Publish (manual)
     if: github.event_name == 'workflow_dispatch'
-    needs: [build]
+    needs: [linux-container]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
