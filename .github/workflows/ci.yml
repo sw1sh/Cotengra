@@ -120,7 +120,7 @@ jobs:
           echo "Linker version (cc):"; cc --version || true
           echo "C++ compiler version (g++):"; g++ --version || true
           echo "Searching for libuuid (pre-build):"; find /usr/lib -maxdepth 4 -name 'libuuid.*' 2>/dev/null | head -n 20 || true
-          echo "Environmental CC (if any): $CC"; echo "Environmental CXX (if any): $CXX"
+          echo "Environmental CC (if any): ${CC:-<unset>}"; echo "Environmental CXX (if any): ${CXX:-<unset>}"
           cargo build --release --target ${{ matrix.target }}
           echo "Searching for libuuid (post-build):"; find /usr/lib -maxdepth 4 -name 'libuuid.*' 2>/dev/null | head -n 20 || true
       - name: Upload artifact
