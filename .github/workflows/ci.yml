@@ -43,8 +43,6 @@ jobs:
             echo "ERROR: WolframKernel not in PATH" >&2
           fi
       - uses: actions/checkout@v4
-        with:
-          lfs: true
       - name: Install Rust
         run: |
           set -euo pipefail
