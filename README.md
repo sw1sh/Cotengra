@@ -64,5 +64,18 @@ On Windows host (GitHub Actions already covers this):
 - x86_64-pc-windows-msvc
 
 ## Wolfram Usage
+## Packaging macOS Library into Paclet
+
+After building the release library locally on macOS:
+
+```
+chmod +x scripts/package_macos.sh
+./scripts/package_macos.sh
+```
+
+This copies `target/release/libcotengra.dylib` into the appropriate `Cotengra/LibraryResources/MacOSX-<arch>/` directory so the paclet can load it via `LibraryFunctionLoad` automatically.
+
+For universal binaries, first lipo the two arch builds into `dist/libcotengra_universal.dylib` and then copy that instead (renaming to `libcotengra.dylib`).
+
 
 Load the produced shared library with `LibraryFunctionLoad` to access the exported functions (annotated with `#[wll::export]`). Ensure Wolfram installation is discoverable for the build (override with `WOLFRAM_APPDIR` if necessary).
