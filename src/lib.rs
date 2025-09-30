@@ -105,15 +105,15 @@ fn is_simplifiable(legs: &Legs, appearances: &Vec<Count>) -> bool {
 }
 
 fn compute_simplified(legs: &Legs, appearances: &Vec<Count>) -> Legs {
-    if legs.len() == 0 {
+    if legs.is_empty() {
         return legs.clone();
     }
     let mut new_legs: Legs = Vec::with_capacity(legs.len());
-
     let (mut cur_ix, mut cur_cnt) = legs[0];
     for &(ix, ix_cnt) in legs.iter().skip(1) {
         if ix == cur_ix {
-            cur_cnt += 1;
+            // accumulate real stored count (was previously always += 1)
+            cur_cnt += ix_cnt;
         } else {
             if cur_cnt != appearances[cur_ix as usize] {
                 new_legs.push((cur_ix, cur_cnt));
@@ -121,6 +121,10 @@ fn compute_simplified(legs: &Legs, appearances: &Vec<Count>) -> Legs {
             cur_ix = ix;
             cur_cnt = ix_cnt;
         }
+    }
+    // push final group (was previously omitted)
+    if cur_cnt != appearances[cur_ix as usize] {
+        new_legs.push((cur_ix, cur_cnt));
     }
     new_legs
 }
