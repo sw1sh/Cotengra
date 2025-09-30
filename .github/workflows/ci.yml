@@ -34,23 +34,30 @@ jobs:
         run: |
           set -euo pipefail
           if command -v WolframKernel >/dev/null 2>&1; then
-            KERNEL=$(command -v WolframKernel)
+            KERNEL=$(readlink -f "$(command -v WolframKernel)")
             EXEC_DIR=$(dirname "$KERNEL")
-            ENGINE_ROOT=$(dirname "$EXEC_DIR")
-            # Handle .../Executables nesting
-            if [[ $(basename "$EXEC_DIR") == "Executables" ]]; then
-              ENGINE_ROOT=$(dirname "$ENGINE_ROOT")
-            fi
+            ENGINE_ROOT=$(dirname "$EXEC_DIR")  # keep versioned directory (contains SystemFiles)
             echo "Detected WolframKernel: $KERNEL"
-            echo "Engine root candidate: $ENGINE_ROOT"
+            echo "Executables dir: $EXEC_DIR"
+            echo "Engine root (versioned): $ENGINE_ROOT"
+            if [ ! -d "$ENGINE_ROOT/SystemFiles" ]; then
+              echo "WARNING: Expected SystemFiles not found under $ENGINE_ROOT" >&2
+            fi
             echo "WOLFRAM_APP_DIRECTORY=$ENGINE_ROOT" >> $GITHUB_ENV
-            echo "RUST_WOLFRAM_LOCATION=$ENGINE_ROOT" >> $GITHUB_ENV
-            DEVKIT_DIR=$(find "$ENGINE_ROOT" -maxdepth 6 -type d -path '*/DeveloperKit/*/CompilerAdditions' | head -n1 || true)
+            # Discover DeveloperKit CompilerAdditions explicitly
+            DEVKIT_SEARCH_BASE="$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit"
+            if [ -d "$DEVKIT_SEARCH_BASE" ]; then
+              DEVKIT_DIR=$(find "$DEVKIT_SEARCH_BASE" -maxdepth 3 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
+            else
+              DEVKIT_DIR=""
+            fi
             if [ -n "$DEVKIT_DIR" ]; then
               echo "Found CompilerAdditions: $DEVKIT_DIR"
               echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$DEVKIT_DIR" >> $GITHUB_ENV
+              echo "Listing contents:"; ls -1 "$DEVKIT_DIR" || true
             else
-              echo "No CompilerAdditions directory found (continuing)"
+              echo "WARNING: Could not locate CompilerAdditions under $DEVKIT_SEARCH_BASE" >&2
+              echo "Will rely on wolfram-app-discovery fallback; wstp-sys may fail." >&2
             fi
           else
             echo "WolframKernel not found in PATH; wstp-sys may fail" >&2
