@@ -132,7 +132,19 @@ jobs:
           ARM64_LIB=$(find artifacts -type f -path '*/cotengra-aarch64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
           if [ -n "$X64_LIB" ]; then cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/; fi
           if [ -n "$ARM64_LIB" ]; then cp "$ARM64_LIB" Cotengra/LibraryResources/Linux-ARM64/; fi
+          echo "Preserving any pre-existing LibraryResources (e.g. MacOSX-*) committed in repo."
           echo "Contents of LibraryResources:"; find Cotengra/LibraryResources -maxdepth 3 -type f || true
+      - name: Archive LibraryResources
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          tar czf build/LibraryResources.tar.gz Cotengra/LibraryResources
+          echo "Archive size:"; du -h build/LibraryResources.tar.gz
+      - name: Upload LibraryResources Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: cotengra-libraryresources
+          path: build/LibraryResources.tar.gz
       - name: Build Paclet
         id: build_paclet
         run: |
@@ -152,5 +164,21 @@ jobs:
         run: |
           if [ -z "$WOLFRAM_CLOUD_USER" ] || [ -z "$WOLFRAM_CLOUD_PASSWORD" ]; then
             echo "Cloud credentials not provided; skipping upload."; exit 0; fi
-          wolframscript -code "CloudConnect[\"$WOLFRAM_CLOUD_USER\", \"$WOLFRAM_CLOUD_PASSWORD\"]; CopyFile[\"$PACLET_PATH\", CloudObject[\"Cotengra.paclet\", Permissions->\"Public\"], OverwriteTarget->True]; Print[\"Uploaded paclet to Wolfram Cloud.\"];"
+          wolframscript -code "CloudConnect[\"$WOLFRAM_CLOUD_USER\", \"$WOLFRAM_CLOUD_PASSWORD\"]; CopyFile[\"$PACLET_PATH\", CloudObject[\"Cotengra.paclet\", Permissions->\"Public\"], OverwriteTarget->True]; Print[\"Uploaded paclet to Wolfram Cloud.\"];" || { echo 'Paclet upload failed'; exit 1; }
+          # Upload individual libraries (if present) for direct consumption
+          LIB_UPLOAD_CODE=$(cat <<'EOF'
+            CloudConnect["$WOLFRAM_CLOUD_USER", "$WOLFRAM_CLOUD_PASSWORD"]; 
+            Quiet@Module[{base = FileNameJoin[{Directory[], "Cotengra", "LibraryResources"}], files},
+              files = FileNames["*", base, Infinity];
+              Do[
+                CloudPut[Import[f, "ByteArray"], 
+                  CloudObject[FileNameJoin[{"Cotengra","libs", StringDrop[f, StringLength[base]+2]}], Permissions->"Public"], 
+                  OverwriteTarget->True],
+                {f, files}
+              ];
+              Print["Uploaded "<> ToString[Length[files]] <> " library resource files."]
+            ]
+          EOF
+          )
+          wolframscript -code "$LIB_UPLOAD_CODE" || echo "Library upload encountered an error (continuing)"
         
