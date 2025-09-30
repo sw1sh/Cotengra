@@ -131,6 +131,9 @@ jobs:
       options: --user root
     env:
       WOLFRAM_SYSTEM_ID: Linux-x86-64
+      RESOURCE_PUBLISHER_TOKEN: ${{ secrets.RESOURCE_PUBLISHER_TOKEN }}
+      WOLFRAMSCRIPT_ENTITLEMENTID: ${{ secrets.WOLFRAMSCRIPT_ENTITLEMENTID }}
+      WLPR_PACLET_SITE: https://resources.wolframcloud.com/PacletRepository/pacletsite
     steps:
       - uses: actions/checkout@v4
       - name: Download build artifacts
