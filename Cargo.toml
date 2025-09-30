@@ -13,7 +13,7 @@ bit-set = "0.5"
 ordered-float = "3.9"
 rand = "0.8"
 rustc-hash = "1.1"
-wolfram-library-link = {path = "/root/wolfram-library-link-rs/wolfram-library-link"}
+wolfram-library-link = { git = "https://github.com/sw1sh/wolfram-library-link-rs", branch = "feature/more-types" }
 
 [profile.release]
 codegen-units = 1
