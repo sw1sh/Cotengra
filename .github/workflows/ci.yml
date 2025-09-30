@@ -12,8 +12,8 @@ defaults:
     shell: bash
 
 jobs:
-  linux-container:
-    name: Linux (wolframengine container)
+  linux:
+    name: Linux (${{ matrix.target }}) WSTP
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -23,58 +23,55 @@ jobs:
       image: wolframresearch/wolframengine:latest
       options: --user root
     env:
-      # Hints for discovery if needed; container should already have an engine.
       WOLFRAM_SYSTEM_ID: Linux-x86-64
     steps:
       - name: Install prerequisites
         run: |
+          set -euxo pipefail
           apt-get update
-          apt-get install -y bash curl ca-certificates git build-essential pkg-config \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu uuid-dev || true
-          # If building aarch64 target, add arm64 architecture and install required runtime/dev libs
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+          DEBIAN_FRONTEND=noninteractive apt-get install -y bash curl ca-certificates git build-essential pkg-config uuid-dev
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             dpkg --add-architecture arm64
-            apt-get update
-            # Install uuid and stdc++ dev libs for arm64 so linker finds -luuid and -lstdc++
-            apt-get install -y libuuid1:arm64 uuid-dev:arm64 libstdc++-12-dev:arm64 || true
+            apt-get update || true
+            # Core cross toolchain & libs (best-effort; tolerate failures to inspect later)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y libuuid1:arm64 uuid-dev:arm64 libstdc++-12-dev:arm64 || true
           fi
-          # Show uuid libs for x86 host (helps debug -luuid failure on x86)
           echo "Checking host uuid libraries:"; ls -1 /usr/lib/x86_64-linux-gnu/libuuid* || true
           ldconfig -p | grep -i uuid || true
-      - name: Locate Wolfram Engine
+      - name: Locate Wolfram Engine / DeveloperKit
         run: |
           set -euo pipefail
           if command -v WolframKernel >/dev/null 2>&1; then
             KERNEL=$(readlink -f "$(command -v WolframKernel)")
             EXEC_DIR=$(dirname "$KERNEL")
-            ENGINE_ROOT=$(dirname "$EXEC_DIR")  # keep versioned directory (contains SystemFiles)
+            ENGINE_ROOT=$(dirname "$EXEC_DIR")
             echo "Detected WolframKernel: $KERNEL"
-            echo "Executables dir: $EXEC_DIR"
-            echo "Engine root (versioned): $ENGINE_ROOT"
-            if [ ! -d "$ENGINE_ROOT/SystemFiles" ]; then
-              echo "WARNING: Expected SystemFiles not found under $ENGINE_ROOT" >&2
-            fi
             echo "WOLFRAM_APP_DIRECTORY=$ENGINE_ROOT" >> $GITHUB_ENV
-            # Discover DeveloperKit CompilerAdditions explicitly
-            DEVKIT_SEARCH_BASE="$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit"
-            if [ -d "$DEVKIT_SEARCH_BASE" ]; then
-              DEVKIT_DIR=$(find "$DEVKIT_SEARCH_BASE" -maxdepth 3 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
-            else
-              DEVKIT_DIR=""
+            DEVKIT_BASE="$ENGINE_ROOT/SystemFiles/Links/WSTP/DeveloperKit"
+            echo "Listing DeveloperKit contents:"; find "$DEVKIT_BASE" -maxdepth 3 -type d -name CompilerAdditions || true
+            # Prefer architecture-specific CompilerAdditions if present
+            if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+              ARM_DIR=$(find "$DEVKIT_BASE" -maxdepth 4 -type d -path '*Linux-ARM64*/*/CompilerAdditions' -print -quit 2>/dev/null || true)
+              if [ -n "$ARM_DIR" ]; then
+                echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$ARM_DIR" >> $GITHUB_ENV
+                echo "Using ARM64 CompilerAdditions: $ARM_DIR"
+              fi
             fi
-            if [ -n "$DEVKIT_DIR" ]; then
-              echo "Found CompilerAdditions: $DEVKIT_DIR"
-              echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$DEVKIT_DIR" >> $GITHUB_ENV
-              echo "Listing contents:"; ls -1 "$DEVKIT_DIR" || true
-            else
-              echo "WARNING: Could not locate CompilerAdditions under $DEVKIT_SEARCH_BASE" >&2
-              echo "Will rely on wolfram-app-discovery fallback; wstp-sys may fail." >&2
+            if [ -z "${WSTP_COMPILER_ADDITIONS_DIRECTORY:-}" ]; then
+              GEN_DIR=$(find "$DEVKIT_BASE" -maxdepth 4 -type d -name CompilerAdditions -print -quit 2>/dev/null || true)
+              if [ -n "$GEN_DIR" ]; then
+                echo "WSTP_COMPILER_ADDITIONS_DIRECTORY=$GEN_DIR" >> $GITHUB_ENV
+                echo "Using generic CompilerAdditions: $GEN_DIR"
+              else
+                echo "WARNING: No CompilerAdditions directory found." >&2
+              fi
             fi
           else
             echo "WolframKernel not found in PATH; wstp-sys may fail" >&2
           fi
       - uses: actions/checkout@v4
-      - name: Install Rust (rustup)
+      - name: Install Rust (stable)
         env:
           RUSTUP_HOME: /root/.rustup
           CARGO_HOME: /root/.cargo
@@ -82,22 +79,16 @@ jobs:
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           . /root/.cargo/env
-          # Explicitly (re)install stable to be safe and show toolchains
           rustup toolchain install stable
           rustup default stable
           rustup target add ${{ matrix.target }}
-          echo "Toolchains installed:"; ls -1 /root/.rustup/toolchains || true
-          rustup show
-          which cargo
-          cargo --version
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             mkdir -p .cargo
-            # Overwrite with clean config ensuring valid TOML (avoid literal \n sequences)
-              printf '%s\n%s\n' '[target.aarch64-unknown-linux-gnu]' 'linker = "aarch64-linux-gnu-gcc"' > .cargo/config.toml
-            echo "Written .cargo/config.toml:"; cat .cargo/config.toml
-            echo 'CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc' >> $GITHUB_ENV
-            echo 'CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++' >> $GITHUB_ENV
+            printf '%s\n%s\n' '[target.aarch64-unknown-linux-gnu]' 'linker = "aarch64-linux-gnu-gcc"' > .cargo/config.toml
+            cat .cargo/config.toml
           fi
+          rustup show
+          cargo --version
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -114,15 +105,12 @@ jobs:
           set -euo pipefail
           . /root/.cargo/env
           echo "Active toolchain:"; rustup show active-toolchain || true
-          rustup --version || true
-            # List targets to confirm installation
           rustup target list --installed
-          echo "Linker version (cc):"; cc --version || true
-          echo "C++ compiler version (g++):"; g++ --version || true
-          echo "Searching for libuuid (pre-build):"; find /usr/lib -maxdepth 4 -name 'libuuid.*' 2>/dev/null | head -n 20 || true
-          echo "Environmental CC (if any): ${CC:-<unset>}"; echo "Environmental CXX (if any): ${CXX:-<unset>}"
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            echo "Listing aarch64 cross toolchain binaries:"; ls -1 /usr/bin/aarch64-linux-gnu-* 2>/dev/null | head -n 30 || true
+          fi
           cargo build --release --target ${{ matrix.target }}
-          echo "Searching for libuuid (post-build):"; find /usr/lib -maxdepth 4 -name 'libuuid.*' 2>/dev/null | head -n 20 || true
+          echo "Built artifacts:"; ls -1 target/${{ matrix.target }}/release || true
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -163,7 +151,7 @@ jobs:
   publish:
     name: Publish (manual)
     if: github.event_name == 'workflow_dispatch'
-    needs: [linux-container]
+    needs: [linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -175,8 +163,8 @@ jobs:
         run: ls -R dist
 
   package-paclet:
-    name: Package Paclet (Linux libs)
-    needs: linux-container
+    name: Package Paclet (Linux x86_64 + ARM64)
+    needs: linux
     runs-on: ubuntu-latest
     container:
       image: wolframresearch/wolframengine:latest
@@ -192,13 +180,11 @@ jobs:
       - name: Assemble LibraryResources
         run: |
           set -euo pipefail
-          mkdir -p Cotengra/LibraryResources/Linux-x86-64
-          mkdir -p Cotengra/LibraryResources/Linux-ARM64
-          # Copy built shared objects into Paclet layout if available
+          mkdir -p Cotengra/LibraryResources/Linux-x86-64 Cotengra/LibraryResources/Linux-ARM64
           X64_LIB=$(find artifacts -type f -path '*/cotengra-x86_64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
           ARM64_LIB=$(find artifacts -type f -path '*/cotengra-aarch64-unknown-linux-gnu/*' -name 'libcotengra.so' | head -n1 || true)
-          if [ -n "$X64_LIB" ]; then cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/; fi
-          if [ -n "$ARM64_LIB" ]; then cp "$ARM64_LIB" Cotengra/LibraryResources/Linux-ARM64/; fi
+          if [ -n "$X64_LIB" ]; then cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/; echo "Copied x86_64 lib"; fi
+          if [ -n "$ARM64_LIB" ]; then cp "$ARM64_LIB" Cotengra/LibraryResources/Linux-ARM64/; echo "Copied ARM64 lib"; else echo "NOTE: No ARM64 lib found (build may have failed)."; fi
           echo "Preserving any pre-existing LibraryResources (e.g. MacOSX-*) committed in repo."
           echo "Contents of LibraryResources:"; find Cotengra/LibraryResources -maxdepth 3 -type f || true
       - name: Archive LibraryResources
