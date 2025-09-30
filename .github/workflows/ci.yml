@@ -72,13 +72,11 @@ jobs:
           rustup show
           which cargo
           cargo --version
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then \
-            mkdir -p .cargo; \
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            mkdir -p .cargo
             # Overwrite with clean config ensuring valid TOML (avoid literal \n sequences)
-            cat > .cargo/config.toml <<EOF
-            [target.aarch64-unknown-linux-gnu]
-            linker = "aarch64-linux-gnu-gcc"
-            EOF
+              printf '%s\n%s\n' '[target.aarch64-unknown-linux-gnu]' 'linker = "aarch64-linux-gnu-gcc"' > .cargo/config.toml
+            echo "Written .cargo/config.toml:"; cat .cargo/config.toml
           fi
       - name: Cache cargo
         uses: actions/cache@v4
