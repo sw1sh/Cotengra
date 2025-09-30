@@ -458,25 +458,21 @@ impl ContractionProcessor {
     /// only disconnected subgraph terms (outer products) remain.
     fn optimize_remaining_by_size(&mut self) {
         if self.nodes.len() == 1 {
-            // nothing to do
             return;
         };
-
         let mut nodes_sizes: BinaryHeap<(GreedyScore, Node)> = BinaryHeap::default();
         self.nodes.iter().for_each(|(node, legs)| {
             nodes_sizes.push((OrderedFloat(-compute_size(&legs, &self.sizes)), *node));
         });
-
-        let (_, mut i) = nodes_sizes.pop().unwrap();
-        let (_, mut j) = nodes_sizes.pop().unwrap();
+        // pop two smallest (stored as most negative)
+        let i = nodes_sizes.pop().unwrap().1;
+        let j = nodes_sizes.pop().unwrap().1;
         let mut k = self.contract_nodes(i, j);
-
         while self.nodes.len() > 1 {
-            // contract the smallest two nodes until only one remains
             let ksize = compute_size(&self.nodes[&k], &self.sizes);
             nodes_sizes.push((OrderedFloat(-ksize), k));
-            (_, i) = nodes_sizes.pop().unwrap();
-            (_, j) = nodes_sizes.pop().unwrap();
+            let i = nodes_sizes.pop().unwrap().1;
+            let j = nodes_sizes.pop().unwrap().1;
             k = self.contract_nodes(i, j);
         }
     }
