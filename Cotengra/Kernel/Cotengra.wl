@@ -1,4 +1,4 @@
-BeginPackage["Cotengra`"];
+BeginPackage["Wolfram`Cotengra`"];
 
 GreedyPath
 OptimalPath
