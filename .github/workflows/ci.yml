@@ -7,6 +7,10 @@ on:
     branches: [ master ]
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   linux-container:
     name: Linux (wolframengine container)
@@ -25,7 +29,7 @@ jobs:
       - name: Install prerequisites
         run: |
           apt-get update
-          apt-get install -y curl ca-certificates git build-essential pkg-config gcc-aarch64-linux-gnu || true
+          apt-get install -y bash curl ca-certificates git build-essential pkg-config gcc-aarch64-linux-gnu || true
       - uses: actions/checkout@v4
       - name: Install Rust (rustup)
         env:
