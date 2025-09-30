@@ -195,8 +195,8 @@ jobs:
       - name: Upload to Wolfram Cloud (optional)
         env:
           PACLET_PATH: ${{ steps.locate_paclet.outputs.paclet_path }}
-          WOLFRAM_CLOUD_USER: $WOLFRAM_CLOUD_USER
-          WOLFRAM_CLOUD_PASSWORD: $WOLFRAM_CLOUD_PASSWORD
+          WOLFRAM_CLOUD_USER: ${{ secrets.WOLFRAM_CLOUD_USER }}
+          WOLFRAM_CLOUD_PASSWORD: ${{ secrets.WOLFRAM_CLOUD_PASSWORD }}
         run: |
           if [ -z "$WOLFRAM_CLOUD_USER" ] || [ -z "$WOLFRAM_CLOUD_PASSWORD" ]; then
             echo "Cloud credentials not provided; skipping upload."; exit 0; fi
