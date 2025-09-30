@@ -29,7 +29,18 @@ jobs:
       - name: Install prerequisites
         run: |
           apt-get update
-          apt-get install -y bash curl ca-certificates git build-essential pkg-config gcc-aarch64-linux-gnu || true
+          apt-get install -y bash curl ca-certificates git build-essential pkg-config \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu uuid-dev || true
+          # If building aarch64 target, add arm64 architecture and install required runtime/dev libs
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
+            dpkg --add-architecture arm64
+            apt-get update
+            # Install uuid and stdc++ dev libs for arm64 so linker finds -luuid and -lstdc++
+            apt-get install -y libuuid1:arm64 uuid-dev:arm64 libstdc++-12-dev:arm64 || true
+          fi
+          # Show uuid libs for x86 host (helps debug -luuid failure on x86)
+          echo "Checking host uuid libraries:"; ls -1 /usr/lib/x86_64-linux-gnu/libuuid* || true
+          ldconfig -p | grep -i uuid || true
       - name: Locate Wolfram Engine
         run: |
           set -euo pipefail
@@ -84,6 +95,8 @@ jobs:
             # Overwrite with clean config ensuring valid TOML (avoid literal \n sequences)
               printf '%s\n%s\n' '[target.aarch64-unknown-linux-gnu]' 'linker = "aarch64-linux-gnu-gcc"' > .cargo/config.toml
             echo "Written .cargo/config.toml:"; cat .cargo/config.toml
+            echo 'CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc' >> $GITHUB_ENV
+            echo 'CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++' >> $GITHUB_ENV
           fi
       - name: Cache cargo
         uses: actions/cache@v4
@@ -104,7 +117,12 @@ jobs:
           rustup --version || true
             # List targets to confirm installation
           rustup target list --installed
+          echo "Linker version (cc):"; cc --version || true
+          echo "C++ compiler version (g++):"; g++ --version || true
+          echo "Searching for libuuid (pre-build):"; find /usr/lib -maxdepth 4 -name 'libuuid.*' 2>/dev/null | head -n 20 || true
+          echo "Environmental CC (if any): $CC"; echo "Environmental CXX (if any): $CXX"
           cargo build --release --target ${{ matrix.target }}
+          echo "Searching for libuuid (post-build):"; find /usr/lib -maxdepth 4 -name 'libuuid.*' 2>/dev/null | head -n 20 || true
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
