@@ -34,6 +34,9 @@ jobs:
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           . /root/.cargo/env
+          rustup default stable
+          rustup show
+          cargo --version
           rustup target add ${{ matrix.target }}
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then \
             mkdir -p .cargo; \
