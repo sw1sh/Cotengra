@@ -116,11 +116,11 @@ PathIndexContractions[path : {{_Integer, _Integer} ...}, indices : {__List}] :=
 
 PathIndexContractions[path_List, indices : {__List}, contractions : {__List}] :=
 	With[{index = First /@ PositionIndex[Catenate[indices]]},
-		Map[Lookup[index, #] &, Catenate @ PathIndexContractions[path, contractions], {2}]
+		Map[Lookup[index, #] &, PathIndexContractions[path, contractions], {3}]
 	]
 
 PathIndexContractions[path_List, KeyValuePattern[{"Indices" -> indices_, "Contractions" -> contractions_}]] :=
-	PathIndexContractions[path, indices, contractions]
+	Catenate @ PathIndexContractions[path, indices, contractions]
 
 
 End[]
