@@ -11,7 +11,7 @@ PathIndexContractions
 
 Begin["`Private`"];
 
-$libraryName = "libcotengra";
+$libraryName = "libcotengrust";
 
 libraryFunctions = LibraryFunctionLoad[
 	$libraryName,
@@ -27,6 +27,8 @@ GreedyPath[
 	sizeDict : KeyValuePattern[_String -> _Integer],
 	costMod : _ ? NumericQ | None : None,
 	temperature : _ ? NumericQ | None : None,
+	maxNeighbors : _Integer | None : None,
+    seed : _Integer | None : None,
 	simplify : True | False | None : None,
 	useSSA : True | False | None : None
 ] := Block[{ds = Developer`DataStore, path},
@@ -37,6 +39,8 @@ GreedyPath[
 			ds @@ ds @@@ Normal[N /@ sizeDict],
 			ds @ Replace[N[costMod], None -> Sequence[]],
 			ds @ Replace[N[temperature], None -> Sequence[]],
+			ds @ Replace[maxNeighbors, None -> Sequence[]],
+			ds @ Replace[seed, None -> Sequence[]],
 			ds @ Replace[simplify, None -> Sequence[]],
 			ds @ Replace[useSSA, None -> Sequence[]]
 		];

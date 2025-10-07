@@ -1,18 +1,20 @@
 [package]
 name = "cotengra"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Johnnie Gray <johnniemcgray@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [lib]
-name = "cotengra"
+name = "cotengrust"
 crate-type = ["cdylib"]
 
 [dependencies]
-bit-set = "0.5"
-ordered-float = "3.9"
-rand = "0.8"
-rustc-hash = "1.1"
+bit-set = "0.8"
+num-traits = "0.2"
+ordered-float = "5.1"
+pyo3 = "0.26"
+rand = "0.9"
+rustc-hash = "2.1"
 wolfram-library-link = { git = "https://github.com/sw1sh/wolfram-library-link-rs", branch = "feature/more-types" }
 
 [profile.release]

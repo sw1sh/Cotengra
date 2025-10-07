@@ -9,7 +9,7 @@ else
   DEST_DIR="Cotengra/LibraryResources/MacOSX-x86-64"
 fi
 
-LIB_SRC="target/release/libcotengra.dylib"
+LIB_SRC="target/release/libcotengrust.dylib"
 if [[ ! -f "$LIB_SRC" ]]; then
   echo "Release macOS dylib not found at $LIB_SRC. Building..." >&2
   cargo build --release
@@ -17,4 +17,4 @@ fi
 mkdir -p "$DEST_DIR"
 cp "$LIB_SRC" "$DEST_DIR/"
 
-echo "Copied libcotengra.dylib to $DEST_DIR"
+echo "Copied libcotengrust.dylib to $DEST_DIR"

@@ -1,45 +1,58 @@
 use bit_set::BitSet;
+use num_traits::{AsPrimitive, Bounded, PrimInt};
 use ordered_float::OrderedFloat;
 use rand::Rng;
+use rand::SeedableRng;
 use rustc_hash::FxHashMap;
-use std::collections::{BTreeSet, BinaryHeap};
+use std::collections::{BTreeSet, BinaryHeap, HashSet};
 use std::f32;
+use std::hash::Hash;
 
 use FxHashMap as Dict;
 
-type Ix = u16;
-type Count = u8;
-type Legs = Vec<(Ix, Count)>;
-type Node = u16;
+// n.b. this constrains the maximum number index appearances < 256
+type Count = u16;
 type Score = f32;
-type SSAPath = Vec<Vec<Node>>;
 type GreedyScore = OrderedFloat<Score>;
-
+type SSAPath = Vec<Vec<u32>>;
 // types for optimal optimization
-type ONode = u32;
-type Subgraph = BitSet<ONode>;
+type Subgraph = BitSet;
 type BitPath = Vec<(Subgraph, Subgraph)>;
-type SubContraction = (Legs, Score, BitPath);
+type SubContraction<Ix> = (Vec<(Ix, Count)>, Score, BitPath);
+
+// these allow us write generic implementations for u8, u16, u32
+trait IndexType: PrimInt + Bounded + Hash + AsPrimitive<usize> + 'static {}
+trait NodeType: PrimInt + Bounded + Hash + AsPrimitive<usize> + AsPrimitive<u32> + 'static {}
+
+impl<T> IndexType for T where T: PrimInt + Bounded + Hash + AsPrimitive<usize> + 'static {}
+impl<T> NodeType for T where
+    T: PrimInt + Bounded + Hash + AsPrimitive<usize> + AsPrimitive<u32> + 'static
+{
+}
 
 /// helper struct to build contractions from bottom up
-struct ContractionProcessor {
-    nodes: Dict<Node, Legs>,
+#[derive(Clone)]
+struct ContractionProcessor<Ix: IndexType, Node: NodeType> {
+    nodes: Dict<Node, Vec<(Ix, Count)>>,
     edges: Dict<Ix, BTreeSet<Node>>,
     appearances: Vec<Count>,
     sizes: Vec<Score>,
     ssa: Node,
     ssa_path: SSAPath,
+    track_flops: bool,
+    flops: Score,
+    flops_limit: Score,
 }
 
 /// given log(x) and log(y) compute log(x + y), without exponentiating both
-fn logadd(lx: Score, ly: Score) -> Score {
+fn ln_add(lx: Score, ly: Score) -> Score {
     let max_val = lx.max(ly);
     max_val + f32::ln_1p(f32::exp(-f32::abs(lx - ly)))
 }
 
 /// given log(x) and log(y) compute log(x - y), without exponentiating both,
 /// if (x - y) is negative, return -log(x - y).
-fn logsub(lx: f32, ly: f32) -> f32 {
+fn ln_sub(lx: f32, ly: f32) -> f32 {
     if lx < ly {
         -ly - f32::ln_1p(-f32::exp(lx - ly))
     } else {
@@ -47,12 +60,16 @@ fn logsub(lx: f32, ly: f32) -> f32 {
     }
 }
 
-fn compute_legs(ilegs: &Legs, jlegs: &Legs, appearances: &Vec<Count>) -> Legs {
+fn compute_legs<Ix: IndexType>(
+    ilegs: &[(Ix, Count)],
+    jlegs: &[(Ix, Count)],
+    appearances: &Vec<Count>,
+) -> Vec<(Ix, Count)> {
     let mut ip = 0;
     let mut jp = 0;
     let ni = ilegs.len();
     let nj = jlegs.len();
-    let mut new_legs: Legs = Vec::with_capacity(ilegs.len() + jlegs.len());
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(ilegs.len() + jlegs.len());
 
     loop {
         if ip == ni {
@@ -78,7 +95,7 @@ fn compute_legs(ilegs: &Legs, jlegs: &Legs, appearances: &Vec<Count>) -> Legs {
         } else {
             // index appears in both
             let new_count = ic + jc;
-            if new_count != appearances[ix as usize] {
+            if new_count != appearances[ix.as_()] {
                 // not last appearance -> kept index contributes to new size
                 new_legs.push((ix, new_count));
             }
@@ -89,14 +106,33 @@ fn compute_legs(ilegs: &Legs, jlegs: &Legs, appearances: &Vec<Count>) -> Legs {
     new_legs
 }
 
-fn compute_size(legs: &Legs, sizes: &Vec<Score>) -> Score {
-    legs.iter().map(|&(ix, _)| sizes[ix as usize]).sum()
+fn compute_size<Ix: IndexType>(legs: &[(Ix, Count)], sizes: &Vec<Score>) -> Score {
+    legs.iter().map(|&(ix, _)| sizes[ix.as_()]).sum()
 }
 
-fn is_simplifiable(legs: &Legs, appearances: &Vec<Count>) -> bool {
-    let mut prev_ix = Node::MAX;
+fn compute_flops<Ix: IndexType>(
+    ilegs: &[(Ix, Count)],
+    jlegs: &[(Ix, Count)],
+    sizes: &Vec<Score>,
+) -> Score {
+    let mut flops: Score = 0.0;
+    let mut seen: HashSet<Ix> = HashSet::with_capacity(ilegs.len());
+    for &(ix, _) in ilegs {
+        seen.insert(ix);
+        flops += sizes[ix.as_()];
+    }
+    for (ix, _) in jlegs {
+        if !seen.contains(ix) {
+            flops += sizes[ix.as_()];
+        }
+    }
+    flops
+}
+
+fn is_simplifiable<Ix: IndexType>(legs: &[(Ix, Count)], appearances: &Vec<Count>) -> bool {
+    let mut prev_ix = Ix::max_value();
     for &(ix, ix_count) in legs {
-        if (ix == prev_ix) || (ix_count == appearances[ix as usize]) {
+        if (ix == prev_ix) || (ix_count == appearances[ix.as_()]) {
             return true;
         }
         prev_ix = ix;
@@ -104,44 +140,56 @@ fn is_simplifiable(legs: &Legs, appearances: &Vec<Count>) -> bool {
     false
 }
 
-fn compute_simplified(legs: &Legs, appearances: &Vec<Count>) -> Legs {
-    if legs.is_empty() {
-        return legs.clone();
+fn compute_simplified<Ix: IndexType>(
+    legs: &[(Ix, Count)],
+    appearances: &Vec<Count>,
+) -> Vec<(Ix, Count)> {
+    if legs.len() == 0 {
+        return legs.to_vec();
     }
-    let mut new_legs: Legs = Vec::with_capacity(legs.len());
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(legs.len());
+
     let (mut cur_ix, mut cur_cnt) = legs[0];
     for &(ix, ix_cnt) in legs.iter().skip(1) {
         if ix == cur_ix {
-            // accumulate real stored count (was previously always += 1)
+            // accumulate full stored count (not just +1)
             cur_cnt += ix_cnt;
         } else {
-            if cur_cnt != appearances[cur_ix as usize] {
+            if cur_cnt != appearances[cur_ix.as_()] {
                 new_legs.push((cur_ix, cur_cnt));
             }
             cur_ix = ix;
             cur_cnt = ix_cnt;
         }
     }
-    // push final group (was previously omitted)
-    if cur_cnt != appearances[cur_ix as usize] {
+    // push final group if not fully consumed
+    if cur_cnt != appearances[cur_ix.as_()] {
         new_legs.push((cur_ix, cur_cnt));
     }
     new_legs
 }
 
-impl ContractionProcessor {
+impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
     fn new(
         inputs: Vec<Vec<char>>,
         output: Vec<char>,
         size_dict: Dict<char, f32>,
-    ) -> ContractionProcessor {
-        let mut nodes: Dict<Node, Legs> = Dict::default();
+        track_flops: bool,
+    ) -> ContractionProcessor<Ix, Node> {
+        if size_dict.len() > Ix::max_value().as_() {
+            panic!(
+                "cotengrust: too many indices, maximum is {}",
+                Ix::max_value().as_()
+            );
+        }
+
+        let mut nodes: Dict<Node, Vec<(Ix, Count)>> = Dict::default();
         let mut edges: Dict<Ix, BTreeSet<Node>> = Dict::default();
         let mut indmap: Dict<char, Ix> = Dict::default();
         let mut sizes: Vec<Score> = Vec::with_capacity(size_dict.len());
         let mut appearances: Vec<Count> = Vec::with_capacity(size_dict.len());
         // enumerate index labels as unsigned integers from 0
-        let mut c: Ix = 0;
+        let mut c: Ix = Ix::zero();
 
         for (i, term) in inputs.into_iter().enumerate() {
             let mut legs = Vec::with_capacity(term.len());
@@ -150,30 +198,31 @@ impl ContractionProcessor {
                     None => {
                         // index not parsed yet
                         indmap.insert(ind, c);
-                        edges.insert(c, std::iter::once(i as Node).collect());
+                        edges.insert(c, std::iter::once(Node::from(i).unwrap()).collect());
                         appearances.push(1);
-                        // use natural log so all accumulated costs live in same log space
-                        sizes.push(size_dict[&ind].ln());
+                        sizes.push(f32::ln(size_dict[&ind] as f32));
                         legs.push((c, 1));
-                        c += 1;
+                        c = c + Ix::one();
                     }
                     Some(&ix) => {
                         // index already present
-                        appearances[ix as usize] += 1;
-                        edges.get_mut(&ix).unwrap().insert(i as Node);
+                        appearances[ix.as_()] += 1;
+                        edges.get_mut(&ix).unwrap().insert(Node::from(i).unwrap());
                         legs.push((ix, 1));
                     }
                 };
             }
             legs.sort();
-            nodes.insert(i as Node, legs);
+            nodes.insert(Node::from(i).unwrap(), legs);
         }
         output.into_iter().for_each(|ind| {
-            appearances[indmap[&ind] as usize] += 1;
+            appearances[indmap[&ind].as_()] += 1;
         });
 
-        let ssa = nodes.len() as Node;
-        let ssa_path: SSAPath = Vec::with_capacity(2 * ssa as usize - 1);
+        let ssa = Node::from(nodes.len()).unwrap();
+        let ssa_path: SSAPath = Vec::with_capacity(2 * nodes.len() - 1);
+        let flops: Score = 0.0;
+        let flops_limit: Score = Score::INFINITY;
 
         ContractionProcessor {
             nodes,
@@ -182,12 +231,33 @@ impl ContractionProcessor {
             sizes,
             ssa,
             ssa_path,
+            track_flops,
+            flops,
+            flops_limit,
         }
     }
 
     fn neighbors(&self, i: Node) -> BTreeSet<Node> {
         let mut js = BTreeSet::default();
         for (ix, _) in self.nodes[&i].iter() {
+            self.edges[&ix].iter().for_each(|&j| {
+                if j != i {
+                    js.insert(j);
+                };
+            });
+        }
+        js
+    }
+
+    /// like neighbors but skip edges with too many neighbors, for greedy
+    fn neighbors_limit(&self, i: Node, max_neighbors: usize) -> BTreeSet<Node> {
+        let mut js = BTreeSet::default();
+        for (ix, _) in self.nodes[&i].iter() {
+            if max_neighbors != 0 && self.edges[&ix].len() > max_neighbors {
+                // basically a batch index with too many combinations -> skip
+                continue;
+            }
+
             self.edges[&ix].iter().for_each(|&j| {
                 if j != i {
                     js.insert(j);
@@ -205,7 +275,7 @@ impl ContractionProcessor {
     }
 
     /// remove a node from the graph, update the edgemap, return the legs
-    fn pop_node(&mut self, i: Node) -> Legs {
+    fn pop_node(&mut self, i: Node) -> Vec<(Ix, Count)> {
         let legs = self.nodes.remove(&i).unwrap();
         for (ix, _) in legs.iter() {
             let enodes = match self.edges.get_mut(&ix) {
@@ -223,14 +293,16 @@ impl ContractionProcessor {
     }
 
     /// add a new node to the graph, update the edgemap, return the new id
-    fn add_node(&mut self, legs: Legs) -> Node {
+    fn add_node(&mut self, legs: Vec<(Ix, Count)>) -> Node {
         let i = self.ssa;
-        self.ssa += 1;
+        self.ssa = self.ssa + Node::one();
         for (ix, _) in &legs {
             self.edges
                 .entry(*ix)
-                .and_modify(|nodes| {nodes.insert(i);})
-                .or_insert(std::iter::once(i as Node).collect());
+                .and_modify(|nodes| {
+                    nodes.insert(i);
+                })
+                .or_insert(std::iter::once(i).collect());
         }
         self.nodes.insert(i, legs);
         i
@@ -240,9 +312,24 @@ impl ContractionProcessor {
     fn contract_nodes(&mut self, i: Node, j: Node) -> Node {
         let ilegs = self.pop_node(i);
         let jlegs = self.pop_node(j);
+        if self.track_flops {
+            self.flops = ln_add(self.flops, compute_flops(&ilegs, &jlegs, &self.sizes));
+        }
         let new_legs = compute_legs(&ilegs, &jlegs, &self.appearances);
         let k = self.add_node(new_legs);
-        self.ssa_path.push(vec![i, j]);
+        self.ssa_path.push(vec![i.as_(), j.as_()]);
+        k
+    }
+
+    /// contract two nodes (which we already know the legs for), return the new node id
+    fn contract_nodes_given_legs(&mut self, i: Node, j: Node, new_legs: Vec<(Ix, Count)>) -> Node {
+        let ilegs = self.pop_node(i);
+        let jlegs = self.pop_node(j);
+        if self.track_flops {
+            self.flops = ln_add(self.flops, compute_flops(&ilegs, &jlegs, &self.sizes));
+        }
+        let k = self.add_node(new_legs);
+        self.ssa_path.push(vec![i.as_(), j.as_()]);
         k
     }
 
@@ -267,7 +354,7 @@ impl ContractionProcessor {
                 self.pop_node(i);
                 let legs_reduced = compute_simplified(&legs, &self.appearances);
                 self.add_node(legs_reduced);
-                self.ssa_path.push(vec![i]);
+                self.ssa_path.push(vec![i.as_()]);
             }
         }
     }
@@ -275,58 +362,62 @@ impl ContractionProcessor {
     /// combine and remove all scalars
     fn simplify_scalars(&mut self) {
         let mut scalars = Vec::new();
-        let mut smallest_non_scalar: Option<Node> = None;
-        let mut smallest_ndim: usize = usize::MAX;
+        let mut j: Option<Node> = None;
+        let mut jndim: usize = 0;
         for (i, legs) in self.nodes.iter() {
             let ndim = legs.len();
             if ndim == 0 {
                 scalars.push(*i);
-            } else if ndim < smallest_ndim {
-                smallest_non_scalar = Some(*i);
-                smallest_ndim = ndim;
+            } else {
+                // also search for smallest other term to multiply into
+                if j.is_none() || ndim < jndim {
+                    j = Some(*i);
+                    jndim = ndim;
+                }
             }
         }
-        if scalars.is_empty() {
-            return;
-        }
-        // chain all scalars into a single scalar (if >1)
-        let mut acc = scalars[0];
-        for s in scalars.iter().skip(1) {
-            acc = self.contract_nodes(acc, *s);
-        }
-        // multiply resulting scalar into the smallest non-scalar term if any
-        if let Some(target) = smallest_non_scalar {
-            if self.nodes.contains_key(&acc) && self.nodes.contains_key(&target) {
-                self.contract_nodes(acc, target);
+        if !scalars.is_empty() {
+            // chain all scalars into a single scalar node
+            let mut acc = scalars[0];
+            for &s in scalars.iter().skip(1) {
+                if self.nodes.contains_key(&acc) && self.nodes.contains_key(&s) {
+                    acc = self.contract_nodes(acc, s);
+                }
+            }
+            // multiply resultant scalar into smallest non-scalar (if any) so it doesn't linger
+            if let Some(target) = j {
+                if self.nodes.contains_key(&acc) && self.nodes.contains_key(&target) {
+                    self.contract_nodes(acc, target);
+                }
             }
         }
     }
 
     /// combine all terms that have the same legs
     fn simplify_hadamard(&mut self) {
-        // group all nodes by their legs (including permutations)
-        let mut groups: Dict<BTreeSet<Ix>, Vec<Node>> = Dict::default();
-        // keep track of groups with size >= 2
-        let mut hadamards: BTreeSet<BTreeSet<Ix>> = BTreeSet::default();
+        // group by full legs (including counts) so only *identical* tensors combine
+        let mut groups: Dict<Vec<(Ix, Count)>, Vec<Node>> = Dict::default();
+        let mut keys_multi: Vec<Vec<(Ix, Count)>> = Vec::new();
         for (i, legs) in self.nodes.iter() {
-            let key: BTreeSet<Ix> = legs.iter().map(|&(ix, _)| ix).collect();
+            let key = legs.clone(); // legs already sorted
             match groups.get_mut(&key) {
-                Some(group) => {
-                    hadamards.insert(key);
-                    group.push(*i);
+                Some(v) => {
+                    if v.len() == 1 { keys_multi.push(key.clone()); }
+                    v.push(*i);
                 }
                 None => {
                     groups.insert(key, vec![*i]);
                 }
             }
         }
-        for key in hadamards.into_iter() {
-            let mut group = groups.remove(&key).unwrap();
-            while group.len() > 1 {
-                let i = group.pop().unwrap();
-                let j = group.pop().unwrap();
-                let k = self.contract_nodes(i, j);
-                group.push(k);
+        for key in keys_multi.into_iter() {
+            if let Some(mut group) = groups.remove(&key) {
+                while group.len() > 1 {
+                    let i = group.pop().unwrap();
+                    let j = group.pop().unwrap();
+                    let k = self.contract_nodes(i, j);
+                    group.push(k);
+                }
             }
         }
     }
@@ -345,12 +436,12 @@ impl ContractionProcessor {
     }
 
     /// find disconnected subgraphs
-    fn subgraphs(&self) -> Vec<Vec<Node>> {
+    fn subgraphs(&self) -> SSAPath {
         let mut remaining: BTreeSet<Node> = BTreeSet::default();
         self.nodes.keys().for_each(|i| {
             remaining.insert(*i);
         });
-        let mut groups: Vec<Vec<Node>> = Vec::new();
+        let mut groups: SSAPath = Vec::new();
         while remaining.len() > 0 {
             let i = remaining.pop_first().unwrap();
             let mut queue: Vec<Node> = vec![i];
@@ -367,24 +458,40 @@ impl ContractionProcessor {
             group.iter().for_each(|i| {
                 remaining.remove(i);
             });
-            groups.push(group.into_iter().collect());
+            groups.push(group.into_iter().map(|n| n.as_()).collect());
         }
         groups
     }
 
     /// greedily optimize the contraction order of all terms
-    fn optimize_greedy(&mut self, costmod: Option<f32>, temperature: Option<f32>) {
-        let mut rng = rand::thread_rng();
+    fn optimize_greedy(
+        &mut self,
+        costmod: Option<f32>,
+        temperature: Option<f32>,
+        max_neighbors: Option<usize>,
+        seed: Option<u64>,
+    ) -> bool {
         let coeff_t = temperature.unwrap_or(0.0);
         let log_coeff_a = f32::ln(costmod.unwrap_or(1.0));
+        let max_neighbors = max_neighbors.unwrap_or(16);
+
+        let mut rng = if coeff_t != 0.0 {
+            Some(match seed {
+                Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+                None => rand::rngs::StdRng::from_os_rng(),
+            })
+        } else {
+            // zero temp - no need for rng
+            None
+        };
 
         let mut local_score = |sa: Score, sb: Score, sab: Score| -> Score {
-            let gumbel = if coeff_t != 0.0 {
-                coeff_t * -f32::ln(-f32::ln(rng.gen()))
+            let gumbel = if let Some(rng) = &mut rng {
+                coeff_t * -f32::ln(-f32::ln(rng.random()))
             } else {
                 0.0 as f32
             };
-            logsub(sab, log_coeff_a + logadd(sa, sb)) - gumbel
+            ln_sub(sab - log_coeff_a, ln_add(sa, sb) + log_coeff_a) - gumbel
         };
 
         // cache all current nodes sizes as we go
@@ -399,10 +506,15 @@ impl ContractionProcessor {
             BinaryHeap::with_capacity(self.edges.len() * 2);
 
         // the heap keeps a reference to actual contraction info in this
-        let mut contractions: Dict<i32, (Node, Node, Score, Legs)> = Dict::default();
+        let mut contractions: Dict<i32, (Node, Node, Score, Vec<(Ix, Count)>)> = Dict::default();
 
         // get the initial candidate contractions
         for ix_nodes in self.edges.values() {
+            if max_neighbors != 0 && ix_nodes.len() > max_neighbors {
+                // basically a batch index with too many combinations -> skip
+                continue;
+            }
+
             // convert to vector for combinational indexing
             let ix_nodes: Vec<Node> = ix_nodes.iter().cloned().collect();
             // for all combinations of nodes with a connected edge
@@ -431,14 +543,16 @@ impl ContractionProcessor {
             }
 
             // perform contraction:
-            // we already have the legs, so don't call contract_nodes
-            self.pop_node(i);
-            self.pop_node(j);
-            let k = self.add_node(klegs.clone());
-            self.ssa_path.push(vec![i, j]);
+            let k = self.contract_nodes_given_legs(i, j, klegs.clone());
+
+            if self.track_flops && self.flops >= self.flops_limit {
+                // stop if we have reached the flops limit
+                return false;
+            }
+
             node_sizes.insert(k, ksize);
 
-            for l in self.neighbors(k) {
+            for l in self.neighbors_limit(k, max_neighbors) {
                 // assess all neighboring contractions of new node
                 let llegs = &self.nodes[&l];
                 let lsize = node_sizes[&l];
@@ -450,7 +564,25 @@ impl ContractionProcessor {
                 contractions.insert(c, (k, l, msize, mlegs));
                 c -= 1;
             }
+
+            // // potential queue pruning?
+            // if queue.len() > 100_000 {
+            //     let mut valid_contractions = Vec::new();
+            //     for (score, cid) in queue.drain() {
+            //         if let Some((i, j, _, _)) = contractions.get(&cid) {
+            //             if self.nodes.contains_key(&i) && self.nodes.contains_key(&j) {
+            //                 valid_contractions.push((score, cid));
+            //             } else {
+            //                 // Remove stale contraction from map
+            //                 contractions.remove(&cid);
+            //             }
+            //         }
+            //     }
+            //     queue = BinaryHeap::from(valid_contractions);
+            // }
         }
+        // success
+        return true;
     }
 
     /// Optimize the contraction order of all terms using a greedy algorithm
@@ -458,153 +590,182 @@ impl ContractionProcessor {
     /// only disconnected subgraph terms (outer products) remain.
     fn optimize_remaining_by_size(&mut self) {
         if self.nodes.len() == 1 {
+            // nothing to do
             return;
         };
+
         let mut nodes_sizes: BinaryHeap<(GreedyScore, Node)> = BinaryHeap::default();
         self.nodes.iter().for_each(|(node, legs)| {
             nodes_sizes.push((OrderedFloat(-compute_size(&legs, &self.sizes)), *node));
         });
-        // pop two smallest (stored as most negative)
-        let i = nodes_sizes.pop().unwrap().1;
-        let j = nodes_sizes.pop().unwrap().1;
+
+        let (_, mut i) = nodes_sizes.pop().unwrap();
+        let (_, mut j) = nodes_sizes.pop().unwrap();
         let mut k = self.contract_nodes(i, j);
+
         while self.nodes.len() > 1 {
+            // contract the smallest two nodes until only one remains
             let ksize = compute_size(&self.nodes[&k], &self.sizes);
             nodes_sizes.push((OrderedFloat(-ksize), k));
-            let i = nodes_sizes.pop().unwrap().1;
-            let j = nodes_sizes.pop().unwrap().1;
+            (_, i) = nodes_sizes.pop().unwrap();
+            (_, j) = nodes_sizes.pop().unwrap();
             k = self.contract_nodes(i, j);
         }
     }
 }
 
-fn single_el_bitset(x: usize, n: usize) -> BitSet<ONode> {
-    let mut a: BitSet<ONode> = BitSet::with_capacity(n);
+fn single_el_bitset(x: usize, n: usize) -> BitSet {
+    let mut a = BitSet::with_capacity(n);
     a.insert(x);
     a
 }
 
-fn compute_con_cost_flops(
-    temp_legs: Legs,
+fn compute_con_cost_flops<Ix: IndexType>(
+    temp_legs: Vec<(Ix, Count)>,
     appearances: &Vec<Count>,
     sizes: &Vec<Score>,
     iscore: Score,
     jscore: Score,
     _factor: Score,
-) -> (Legs, Score) {
+) -> (Vec<(Ix, Count)>, Score) {
     // remove indices that have reached final appearance
     // and compute cost and size of local contraction
-    let mut new_legs: Legs = Legs::with_capacity(temp_legs.len());
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(temp_legs.len());
     let mut cost: Score = 0.0;
     for (ix, ix_count) in temp_legs.into_iter() {
         // all involved indices contribute to the cost
-        let d = sizes[ix as usize];
+        let d = sizes[ix.as_()];
         cost += d;
-        if ix_count != appearances[ix as usize] {
+        if ix_count != appearances[ix.as_()] {
             // not last appearance -> kept index contributes to new size
             new_legs.push((ix, ix_count));
         }
     }
-    let new_score = logadd(logadd(iscore, jscore), cost);
+    let new_score = ln_add(ln_add(iscore, jscore), cost);
     (new_legs, new_score)
 }
 
-fn compute_con_cost_size(
-    temp_legs: Legs,
+fn compute_con_cost_max<Ix: IndexType>(
+    temp_legs: Vec<(Ix, Count)>,
     appearances: &Vec<Count>,
     sizes: &Vec<Score>,
     iscore: Score,
     jscore: Score,
     _factor: Score,
-) -> (Legs, Score) {
+) -> (Vec<(Ix, Count)>, Score) {
     // remove indices that have reached final appearance
     // and compute cost and size of local contraction
-    let mut new_legs: Legs = Legs::with_capacity(temp_legs.len());
-    let mut size: Score = 0.0;
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(temp_legs.len());
+    let mut cost: Score = 0.0;
     for (ix, ix_count) in temp_legs.into_iter() {
-        if ix_count != appearances[ix as usize] {
+        // all involved indices contribute to the cost
+        let d = sizes[ix.as_()];
+        cost += d;
+        if ix_count != appearances[ix.as_()] {
             // not last appearance -> kept index contributes to new size
             new_legs.push((ix, ix_count));
-            size += sizes[ix as usize];
+        }
+    }
+    let new_score = iscore.max(jscore).max(cost);
+    (new_legs, new_score)
+}
+
+fn compute_con_cost_size<Ix: IndexType>(
+    temp_legs: Vec<(Ix, Count)>,
+    appearances: &Vec<Count>,
+    sizes: &Vec<Score>,
+    iscore: Score,
+    jscore: Score,
+    _factor: Score,
+) -> (Vec<(Ix, Count)>, Score) {
+    // remove indices that have reached final appearance
+    // and compute cost and size of local contraction
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(temp_legs.len());
+    let mut size: Score = 0.0;
+    for (ix, ix_count) in temp_legs.into_iter() {
+        if ix_count != appearances[ix.as_()] {
+            // not last appearance -> kept index contributes to new size
+            new_legs.push((ix, ix_count));
+            size += sizes[ix.as_()];
         }
     }
     let new_score = iscore.max(jscore).max(size);
     (new_legs, new_score)
 }
 
-fn compute_con_cost_write(
-    temp_legs: Legs,
+fn compute_con_cost_write<Ix: IndexType>(
+    temp_legs: Vec<(Ix, Count)>,
     appearances: &Vec<Count>,
     sizes: &Vec<Score>,
     iscore: Score,
     jscore: Score,
     _factor: Score,
-) -> (Legs, Score) {
+) -> (Vec<(Ix, Count)>, Score) {
     // remove indices that have reached final appearance
     // and compute cost and size of local contraction
-    let mut new_legs: Legs = Legs::with_capacity(temp_legs.len());
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(temp_legs.len());
     let mut size: Score = 0.0;
     for (ix, ix_count) in temp_legs.into_iter() {
-        if ix_count != appearances[ix as usize] {
+        if ix_count != appearances[ix.as_()] {
             // not last appearance -> kept index contributes to new size
             new_legs.push((ix, ix_count));
-            size += sizes[ix as usize];
+            size += sizes[ix.as_()];
         }
     }
-    let new_score = logadd(logadd(iscore, jscore), size);
+    let new_score = ln_add(ln_add(iscore, jscore), size);
     (new_legs, new_score)
 }
 
-fn compute_con_cost_combo(
-    temp_legs: Legs,
+fn compute_con_cost_combo<Ix: IndexType>(
+    temp_legs: Vec<(Ix, Count)>,
     appearances: &Vec<Count>,
     sizes: &Vec<Score>,
     iscore: Score,
     jscore: Score,
     factor: Score,
-) -> (Legs, Score) {
+) -> (Vec<(Ix, Count)>, Score) {
     // remove indices that have reached final appearance
     // and compute cost and size of local contraction
-    let mut new_legs: Legs = Legs::with_capacity(temp_legs.len());
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(temp_legs.len());
     let mut size: Score = 0.0;
     let mut cost: Score = 0.0;
     for (ix, ix_count) in temp_legs.into_iter() {
         // all involved indices contribute to the cost
-        let d = sizes[ix as usize];
+        let d = sizes[ix.as_()];
         cost += d;
-        if ix_count != appearances[ix as usize] {
+        if ix_count != appearances[ix.as_()] {
             // not last appearance -> kept index contributes to new size
             new_legs.push((ix, ix_count));
             size += d;
         }
     }
     // the score just for this contraction
-    let new_local_score = logadd(cost, factor + size);
+    let new_local_score = ln_add(cost, factor + size);
 
     // the total score including history
-    let new_score = logadd(logadd(iscore, jscore), new_local_score);
+    let new_score = ln_add(ln_add(iscore, jscore), new_local_score);
 
     (new_legs, new_score)
 }
 
-fn compute_con_cost_limit(
-    temp_legs: Legs,
+fn compute_con_cost_limit<Ix: IndexType>(
+    temp_legs: Vec<(Ix, Count)>,
     appearances: &Vec<Count>,
     sizes: &Vec<Score>,
     iscore: Score,
     jscore: Score,
     factor: Score,
-) -> (Legs, Score) {
+) -> (Vec<(Ix, Count)>, Score) {
     // remove indices that have reached final appearance
     // and compute cost and size of local contraction
-    let mut new_legs: Legs = Legs::with_capacity(temp_legs.len());
+    let mut new_legs: Vec<(Ix, Count)> = Vec::with_capacity(temp_legs.len());
     let mut size: Score = 0.0;
     let mut cost: Score = 0.0;
     for (ix, ix_count) in temp_legs.into_iter() {
         // all involved indices contribute to the cost
-        let d = sizes[ix as usize];
+        let d = sizes[ix.as_()];
         cost += d;
-        if ix_count != appearances[ix as usize] {
+        if ix_count != appearances[ix.as_()] {
             // not last appearance -> kept index contributes to new size
             new_legs.push((ix, ix_count));
             size += d;
@@ -614,15 +775,15 @@ fn compute_con_cost_limit(
     let new_local_score = cost.max(factor + size);
 
     // the total score including history
-    let new_score = logadd(logadd(iscore, jscore), new_local_score);
+    let new_score = ln_add(ln_add(iscore, jscore), new_local_score);
 
     (new_legs, new_score)
 }
 
-impl ContractionProcessor {
+impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
     fn optimize_optimal_connected(
         &mut self,
-        subgraph: Vec<Node>,
+        subgraph: Vec<u32>,
         minimize: Option<String>,
         cost_cap: Option<Score>,
         search_outer: Option<bool>,
@@ -640,23 +801,24 @@ impl ContractionProcessor {
             panic!("invalid minimize: {:?}", minimize);
         }
         let compute_cost = match minimize_type {
-            "flops" => compute_con_cost_flops,
-            "size" => compute_con_cost_size,
-            "write" => compute_con_cost_write,
-            "combo" => compute_con_cost_combo,
-            "limit" => compute_con_cost_limit,
+            "flops" => compute_con_cost_flops::<Ix>,
+            "max" => compute_con_cost_max::<Ix>,
+            "size" => compute_con_cost_size::<Ix>,
+            "write" => compute_con_cost_write::<Ix>,
+            "combo" => compute_con_cost_combo::<Ix>,
+            "limit" => compute_con_cost_limit::<Ix>,
             _ => panic!(
-                "minimize must be one of 'flops', 'size', 'write', 'combo', or 'limit', got {}",
+                "minimize must be one of 'flops', 'max', 'size', 'write', 'combo', or 'limit', got {}",
                 minimize
             ),
         };
         let search_outer = search_outer.unwrap_or(false);
 
         // storage for each possible contraction to reach subgraph of size m
-        let mut contractions: Vec<Dict<Subgraph, SubContraction>> =
+        let mut contractions: Vec<Dict<Subgraph, SubContraction<Ix>>> =
             vec![Dict::default(); subgraph.len() + 1];
         // intermediate storage for the entries we are expanding
-        let mut contractions_m_temp: Vec<(Subgraph, SubContraction)> = Vec::new();
+        let mut contractions_m_temp: Vec<(Subgraph, SubContraction<Ix>)> = Vec::new();
         // need to keep these separately
         let mut best_scores: Dict<Subgraph, Score> = Dict::default();
 
@@ -665,7 +827,8 @@ impl ContractionProcessor {
         let nterms = subgraph.len();
         let mut termmap: Dict<Subgraph, Node> = Dict::default();
 
-        for (i, node) in subgraph.into_iter().enumerate() {
+        for (i, node_u32) in subgraph.into_iter().enumerate() {
+            let node = Node::from(node_u32 as usize).unwrap();
             let isubgraph = single_el_bitset(i, nterms);
             termmap.insert(isubgraph.clone(), node);
             let ilegs = self.nodes[&node].clone();
@@ -696,7 +859,8 @@ impl ContractionProcessor {
                                 continue;
                             }
 
-                            let mut temp_legs: Legs = Vec::with_capacity(ilegs.len() + jlegs.len());
+                            let mut temp_legs: Vec<(Ix, Count)> =
+                                Vec::with_capacity(ilegs.len() + jlegs.len());
                             ip = 0;
                             jp = 0;
                             // if search_outer -> we will never skip
@@ -800,6 +964,129 @@ impl ContractionProcessor {
     }
 }
 
+// ----------------------- dispatch-able functions ------------------------- //
+
+fn run_find_subgraphs<Ix: IndexType, Node: NodeType>(
+    inputs: Vec<Vec<char>>,
+    output: Vec<char>,
+    size_dict: Dict<char, f32>,
+) -> SSAPath {
+    let cp: ContractionProcessor<Ix, Node> =
+        ContractionProcessor::new(inputs, output, size_dict, false);
+    cp.subgraphs()
+}
+
+fn run_simplify<Ix: IndexType, Node: NodeType>(
+    inputs: Vec<Vec<char>>,
+    output: Vec<char>,
+    size_dict: Dict<char, f32>,
+) -> SSAPath {
+    let mut cp: ContractionProcessor<Ix, Node> =
+        ContractionProcessor::new(inputs, output, size_dict, false);
+    cp.simplify();
+    cp.ssa_path
+}
+
+fn run_greedy<Ix: IndexType, Node: NodeType>(
+    inputs: Vec<Vec<char>>,
+    output: Vec<char>,
+    size_dict: Dict<char, f32>,
+    costmod: Option<f32>,
+    temperature: Option<f32>,
+    max_neighbors: Option<usize>,
+    seed: Option<u64>,
+    simplify: bool,
+) -> SSAPath {
+    let mut cp: ContractionProcessor<Ix, Node> =
+        ContractionProcessor::new(inputs, output, size_dict, false);
+    if simplify {
+        cp.simplify();
+    }
+    cp.optimize_greedy(costmod, temperature, max_neighbors, seed);
+    cp.optimize_remaining_by_size();
+    cp.ssa_path
+}
+
+fn run_optimal<Ix: IndexType, Node: NodeType>(
+    inputs: Vec<Vec<char>>,
+    output: Vec<char>,
+    size_dict: Dict<char, f32>,
+    minimize: Option<String>,
+    cost_cap: Option<Score>,
+    search_outer: Option<bool>,
+    simplify: bool,
+) -> SSAPath {
+    let mut cp: ContractionProcessor<Ix, Node> =
+        ContractionProcessor::new(inputs, output, size_dict, false);
+    if simplify {
+        cp.simplify();
+    }
+    cp.optimize_optimal(minimize, cost_cap, search_outer);
+    cp.optimize_remaining_by_size();
+    cp.ssa_path
+}
+
+/// helper function for random greedy optimization with flop tracking
+fn run_random_greedy_optimization<Ix: IndexType, Node: NodeType>(
+    inputs: Vec<Vec<char>>,
+    output: Vec<char>,
+    size_dict: Dict<char, f32>,
+    simplify: bool,
+    seeds: &[u64],
+    costmod_min: f32,
+    costmod_diff: f32,
+    is_const_costmod: bool,
+    temp_min: f32,
+    log_temp_min: f32,
+    log_temp_diff: f32,
+    is_const_temp: bool,
+    max_neighbors: Option<usize>,
+    rng: &mut rand::rngs::StdRng,
+) -> (SSAPath, Score) {
+    let mut cp0: ContractionProcessor<Ix, Node> =
+        ContractionProcessor::new(inputs, output, size_dict, true);
+    if simplify {
+        cp0.simplify();
+    }
+
+    let mut best_path: Option<SSAPath> = None;
+    let mut best_flops = f32::INFINITY;
+
+    for seed in seeds.iter() {
+        let mut cp = cp0.clone();
+
+        let costmod = if is_const_costmod {
+            costmod_min
+        } else {
+            costmod_min + rng.random::<f32>() * costmod_diff
+        };
+
+        let temperature = if is_const_temp {
+            temp_min
+        } else {
+            f32::exp(log_temp_min + rng.random::<f32>() * log_temp_diff)
+        };
+
+        let success =
+            cp.optimize_greedy(Some(costmod), Some(temperature), max_neighbors, Some(*seed));
+
+        if !success {
+            continue;
+        }
+
+        cp.optimize_remaining_by_size();
+
+        if cp.flops < best_flops {
+            best_path = Some(cp.ssa_path);
+            best_flops = cp.flops;
+            cp0.flops_limit = cp.flops;
+        }
+    }
+
+    best_flops *= f32::consts::LOG10_E;
+    (best_path.unwrap(), best_flops)
+}
+
 // --------------------------- WOLFRAM FUNCTIONS ---------------------------- //
 
 use wolfram_library_link::{
@@ -818,14 +1105,14 @@ fn ssa_to_linear(ssa_path: SSAPath, n: Option<usize>) -> SSAPath {
         Some(n) => n,
         None => ssa_path.iter().map(|v| v.len()).sum::<usize>() + ssa_path.len() + 1,
     };
-    let mut ids: Vec<Node> = (0..n).map(|i| i as Node).collect();
+    let mut ids: Vec<u32> = (0..n).map(|i| i as u32).collect();
     let mut path: SSAPath = Vec::with_capacity(2 * n - 1);
-    let mut ssa = n as Node;
+    let mut ssa = n as u32;
     for scon in ssa_path {
         // find the locations of the ssa ids in the list of ids
-        let mut con: Vec<Node> = scon
+        let mut con: Vec<u32> = scon
             .iter()
-            .map(|s| ids.binary_search(s).unwrap() as Node)
+            .map(|s| ids.binary_search(s).unwrap() as u32)
             .collect();
         // remove the ssa ids from the list
         con.sort();
@@ -844,9 +1131,21 @@ fn find_subgraphs(
     inputs: Vec<Vec<char>>,
     output: Vec<char>,
     size_dict: Dict<char, f32>,
-) -> Vec<Vec<Node>> {
-    let cp = ContractionProcessor::new(inputs, output, size_dict);
-    cp.subgraphs()
+) -> SSAPath {
+    let num_indices = size_dict.len();
+    let max_nodes = 2 * inputs.len();
+
+    let subgraphs = match (num_indices, max_nodes) {
+        (idx, nodes) if idx <= u8::MAX as usize && nodes <= u8::MAX as usize => {
+            run_find_subgraphs::<u8, u8>(inputs, output, size_dict)
+        }
+        (idx, nodes) if idx <= u16::MAX as usize && nodes <= u16::MAX as usize => {
+            run_find_subgraphs::<u16, u16>(inputs, output, size_dict)
+        }
+        _ => run_find_subgraphs::<u32, u32>(inputs, output, size_dict),
+    };
+
+    subgraphs
 }
 
 
@@ -858,12 +1157,23 @@ fn optimize_simplify(
     use_ssa: Option<bool>,
 ) -> SSAPath {
     let n = inputs.len();
-    let mut cp = ContractionProcessor::new(inputs, output, size_dict);
-    cp.simplify();
+    let num_indices = size_dict.len();
+    let max_nodes = 2 * n;
+
+    let ssa_path = match (num_indices, max_nodes) {
+        (idx, nodes) if idx <= u8::MAX as usize && nodes <= u8::MAX as usize => {
+            run_simplify::<u8, u8>(inputs, output, size_dict)
+        }
+        (idx, nodes) if idx <= u16::MAX as usize && nodes <= u16::MAX as usize => {
+            run_simplify::<u16, u16>(inputs, output, size_dict)
+        }
+        _ => run_simplify::<u32, u32>(inputs, output, size_dict),
+    };
+
     if use_ssa.unwrap_or(false) {
-        cp.ssa_path
+        ssa_path
     } else {
-        ssa_to_linear(cp.ssa_path, Some(n))
+        ssa_to_linear(ssa_path, Some(n))
     }
 }
 
@@ -874,23 +1184,57 @@ fn optimize_greedy(
     size_dict: Dict<char, f32>,
     costmod: Option<f32>,
     temperature: Option<f32>,
+    max_neighbors: Option<usize>,
+    seed: Option<u64>,
     simplify: Option<bool>,
     use_ssa: Option<bool>,
-) -> Vec<Vec<Node>> {
+) -> SSAPath {
     let n = inputs.len();
-    let mut cp = ContractionProcessor::new(inputs, output, size_dict);
-    if simplify.unwrap_or(true) {
-        // perform simplifications
-        cp.simplify();
-    }
-    // greddily contract each connected subgraph
-    cp.optimize_greedy(costmod, temperature);
-    // optimize any remaining disconnected terms
-    cp.optimize_remaining_by_size();
+    let num_indices = size_dict.len();
+    let max_nodes = 2 * n;
+    let simplify = simplify.unwrap_or(true);
+
+    let ssa_path = match (num_indices, max_nodes) {
+        (idx, nodes) if idx <= u8::MAX as usize && nodes <= u8::MAX as usize => {
+            run_greedy::<u8, u8>(
+                inputs,
+                output,
+                size_dict,
+                costmod,
+                temperature,
+                max_neighbors,
+                seed,
+                simplify,
+            )
+        }
+        (idx, nodes) if idx <= u16::MAX as usize && nodes <= u16::MAX as usize => {
+            run_greedy::<u16, u16>(
+                inputs,
+                output,
+                size_dict,
+                costmod,
+                temperature,
+                max_neighbors,
+                seed,
+                simplify,
+            )
+        }
+        _ => run_greedy::<u32, u32>(
+            inputs,
+            output,
+            size_dict,
+            costmod,
+            temperature,
+            max_neighbors,
+            seed,
+            simplify,
+        ),
+    };
+
     if use_ssa.unwrap_or(false) {
-        cp.ssa_path
+        ssa_path
     } else {
-        ssa_to_linear(cp.ssa_path, Some(n))
+        ssa_to_linear(ssa_path, Some(n))
     }
 }
 
@@ -905,21 +1249,50 @@ fn optimize_optimal(
     search_outer: Option<bool>,
     simplify: Option<bool>,
     use_ssa: Option<bool>,
-) -> Vec<Vec<Node>> {
+) -> SSAPath {
     let n = inputs.len();
-    let mut cp = ContractionProcessor::new(inputs, output, size_dict);
-    if simplify.unwrap_or(true) {
-        // perform simplifications
-        cp.simplify();
-    }
-    // optimally contract each connected subgraph
-    cp.optimize_optimal(minimize, cost_cap, search_outer);
-    // optimize any remaining disconnected terms
-    cp.optimize_remaining_by_size();
+    let num_indices = size_dict.len();
+    let max_nodes = 2 * n;
+    let simplify = simplify.unwrap_or(true);
+
+    let ssa_path = match (num_indices, max_nodes) {
+        (idx, nodes) if idx <= u8::MAX as usize && nodes <= u8::MAX as usize => {
+            run_optimal::<u8, u8>(
+                inputs,
+                output,
+                size_dict,
+                minimize,
+                cost_cap,
+                search_outer,
+                simplify,
+            )
+        }
+        (idx, nodes) if idx <= u16::MAX as usize && nodes <= u16::MAX as usize => {
+            run_optimal::<u16, u16>(
+                inputs,
+                output,
+                size_dict,
+                minimize,
+                cost_cap,
+                search_outer,
+                simplify,
+            )
+        }
+        _ => run_optimal::<u32, u32>(
+            inputs,
+            output,
+            size_dict,
+            minimize,
+            cost_cap,
+            search_outer,
+            simplify,
+        ),
+    };
+
     if use_ssa.unwrap_or(false) {
-        cp.ssa_path
+        ssa_path
     } else {
-        ssa_to_linear(cp.ssa_path, Some(n))
+        ssa_to_linear(ssa_path, Some(n))
     }
 }
 
