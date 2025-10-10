@@ -13,7 +13,7 @@ Begin["`Private`"];
 
 $libraryName = "libcotengrust";
 
-libraryFunctions = LibraryFunctionLoad[
+libraryFunctions = Quiet @ LibraryFunctionLoad[
 	$libraryName,
 	"load_wstp_functions",
 	LinkObject,
