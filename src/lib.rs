@@ -567,6 +567,14 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         // greedily contract remaining
         let mut steps: usize = 0;
         while let Some((_, c0)) = queue.pop() {
+            // allow Wolfram Language to abort this native function
+            if wll::aborted() {
+                return false;
+            }
+            // allow the Wolfram host to request an abort
+            if wll::aborted() {
+                return false;
+            }
             let (i, j, ksize, klegs) = contractions.remove(&c0).unwrap();
             if !self.nodes.contains_key(&i) || !self.nodes.contains_key(&j) {
                 // one of the nodes has been removed -> skip
@@ -891,11 +899,18 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         let cost_cap_incr = f32::ln(2.0);
         let mut cost_cap = cost_cap.unwrap_or(cost_cap_incr);
         while contractions[nterms].len() == 0 {
+            if wll::aborted() { return; }
+            // allow the Wolfram host to abort optimization
+            if wll::aborted() { return; }
             // try building subgraphs of size m
             for m in 2..=nterms {
+                if wll::aborted() { return; }
+                if wll::aborted() { return; }
                 // out of bipartitions of size (k, m - k)
                 for k in 1..=m / 2 {
                     for (isubgraph, (ilegs, iscore, ipath)) in contractions[k].iter() {
+                        if wll::aborted() { return; }
+                        if wll::aborted() { return; }
                         for (jsubgraph, (jlegs, jscore, jpath)) in contractions[m - k].iter() {
                             // filter invalid combinations first
                             if !isubgraph.is_disjoint(&jsubgraph) || {
