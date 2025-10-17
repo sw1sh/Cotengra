@@ -22,9 +22,9 @@ libraryFunctions = Quiet @ LibraryFunctionLoad[
 
 
 GreedyPath[
-	input : {{___String}...},
-	output : {___String},
-	sizeDict : KeyValuePattern[_String -> _Integer],
+	input : {{___Integer}...},
+	output : {___Integer},
+	sizeDict : KeyValuePattern[_Integer -> _Integer],
 	costMod : _ ? NumericQ | None : None,
 	temperature : _ ? NumericQ | None : None,
 	maxNeighbors : _Integer | None : None,
@@ -49,9 +49,9 @@ GreedyPath[
 ]
 
 OptimalPath[
-	input : {{___String}...},
-	output : {___String},
-	sizeDict : KeyValuePattern[_String -> _Integer],
+	input : {{___Integer}...},
+	output : {___Integer},
+	sizeDict : KeyValuePattern[_Integer -> _Integer],
 	minimize : _String | None : None,
 	costCap : _ ? NumericQ | None : None,
 	searchOuter : True | False | None : None,

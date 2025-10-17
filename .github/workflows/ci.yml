@@ -144,12 +144,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p Cotengra/LibraryResources/Linux-x86-64
-          X64_LIB=$(find artifacts -type f -path '*/cotengra-x86_64-unknown-linux-gnu/*' -name 'libcontengrust.so' | head -n1 || true)
+          X64_LIB=$(find artifacts -type f -path '*/cotengra-x86_64-unknown-linux-gnu/*' -name 'libcotengrust.so' | head -n1 || true)
           if [ -n "$X64_LIB" ]; then
             cp "$X64_LIB" Cotengra/LibraryResources/Linux-x86-64/
             echo "Copied x86_64 lib"
           else
-            echo "ERROR: x86_64 libcontengrust.so not found in artifacts" >&2
+            echo "ERROR: x86_64 libcotengrust.so not found in artifacts" >&2
           fi
           echo "Preserving any pre-existing LibraryResources (e.g. MacOSX-*) committed in repo."
           echo "Contents of LibraryResources:"; find Cotengra/LibraryResources -maxdepth 3 -type f || true

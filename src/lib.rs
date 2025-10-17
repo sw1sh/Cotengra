@@ -34,7 +34,7 @@ impl<T> NodeType for T where
 #[derive(Clone)]
 struct ContractionProcessor<Ix: IndexType, Node: NodeType> {
     nodes: Dict<Node, Vec<(Ix, Count)>>,
-    edges: Dict<Ix, BTreeSet<Node>>,
+    edges: Dict<Ix, Vec<Node>>,
     appearances: Vec<Count>,
     sizes: Vec<Score>,
     ssa: Node,
@@ -42,6 +42,8 @@ struct ContractionProcessor<Ix: IndexType, Node: NodeType> {
     track_flops: bool,
     flops: Score,
     flops_limit: Score,
+    total_intermediate_size_ln: Score,
+    max_intermediate_size_ln: Score,
 }
 
 /// given log(x) and log(y) compute log(x + y), without exponentiating both
@@ -171,9 +173,9 @@ fn compute_simplified<Ix: IndexType>(
 
 impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
     fn new(
-        inputs: Vec<Vec<char>>,
-        output: Vec<char>,
-        size_dict: Dict<char, f32>,
+        inputs: Vec<Vec<u32>>,
+        output: Vec<u32>,
+        size_dict: Dict<u32, f32>,
         track_flops: bool,
     ) -> ContractionProcessor<Ix, Node> {
         if size_dict.len() > Ix::max_value().as_() {
@@ -184,8 +186,8 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         }
 
         let mut nodes: Dict<Node, Vec<(Ix, Count)>> = Dict::default();
-        let mut edges: Dict<Ix, BTreeSet<Node>> = Dict::default();
-        let mut indmap: Dict<char, Ix> = Dict::default();
+    let mut edges: Dict<Ix, Vec<Node>> = Dict::default();
+    let mut indmap: Dict<u32, Ix> = Dict::default();
         let mut sizes: Vec<Score> = Vec::with_capacity(size_dict.len());
         let mut appearances: Vec<Count> = Vec::with_capacity(size_dict.len());
         // enumerate index labels as unsigned integers from 0
@@ -198,7 +200,7 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
                     None => {
                         // index not parsed yet
                         indmap.insert(ind, c);
-                        edges.insert(c, std::iter::once(Node::from(i).unwrap()).collect());
+                        edges.insert(c, vec![Node::from(i).unwrap()]);
                         appearances.push(1);
                         sizes.push(f32::ln(size_dict[&ind] as f32));
                         legs.push((c, 1));
@@ -207,7 +209,9 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
                     Some(&ix) => {
                         // index already present
                         appearances[ix.as_()] += 1;
-                        edges.get_mut(&ix).unwrap().insert(Node::from(i).unwrap());
+                        let node = Node::from(i).unwrap();
+                        let en = edges.get_mut(&ix).unwrap();
+                        if !en.contains(&node) { en.push(node); }
                         legs.push((ix, 1));
                     }
                 };
@@ -223,6 +227,8 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         let ssa_path: SSAPath = Vec::with_capacity(2 * nodes.len() - 1);
         let flops: Score = 0.0;
         let flops_limit: Score = Score::INFINITY;
+    let total_intermediate_size_ln: Score = 0.0;
+    let max_intermediate_size_ln: Score = f32::NEG_INFINITY;
 
         ContractionProcessor {
             nodes,
@@ -234,35 +240,40 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
             track_flops,
             flops,
             flops_limit,
+            total_intermediate_size_ln,
+            max_intermediate_size_ln,
         }
     }
 
-    fn neighbors(&self, i: Node) -> BTreeSet<Node> {
-        let mut js = BTreeSet::default();
+    fn neighbors(&self, i: Node) -> Vec<Node> {
+        let mut js: Vec<Node> = Vec::new();
         for (ix, _) in self.nodes[&i].iter() {
-            self.edges[&ix].iter().for_each(|&j| {
-                if j != i {
-                    js.insert(j);
-                };
-            });
+            if let Some(enodes) = self.edges.get(&ix) {
+                for &j in enodes.iter() {
+                    if j != i && !js.contains(&j) {
+                        js.push(j);
+                    }
+                }
+            }
         }
         js
     }
 
     /// like neighbors but skip edges with too many neighbors, for greedy
-    fn neighbors_limit(&self, i: Node, max_neighbors: usize) -> BTreeSet<Node> {
-        let mut js = BTreeSet::default();
+    fn neighbors_limit(&self, i: Node, max_neighbors: usize) -> Vec<Node> {
+        let mut js: Vec<Node> = Vec::new();
         for (ix, _) in self.nodes[&i].iter() {
-            if max_neighbors != 0 && self.edges[&ix].len() > max_neighbors {
-                // basically a batch index with too many combinations -> skip
-                continue;
+            if let Some(enodes) = self.edges.get(&ix) {
+                if max_neighbors != 0 && enodes.len() > max_neighbors {
+                    // basically a batch index with too many combinations -> skip
+                    continue;
+                }
+                for &j in enodes.iter() {
+                    if j != i && !js.contains(&j) {
+                        js.push(j);
+                    }
+                }
             }
-
-            self.edges[&ix].iter().for_each(|&j| {
-                if j != i {
-                    js.insert(j);
-                };
-            });
         }
         js
     }
@@ -278,14 +289,18 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
     fn pop_node(&mut self, i: Node) -> Vec<(Ix, Count)> {
         let legs = self.nodes.remove(&i).unwrap();
         for (ix, _) in legs.iter() {
-            let enodes = match self.edges.get_mut(&ix) {
-                Some(enodes) => enodes,
-                // if repeated index, might have already been removed
-                None => continue,
+            let remove_entire = {
+                match self.edges.get_mut(&ix) {
+                    Some(enodes) => {
+                        if let Some(pos) = enodes.iter().position(|&n| n == i) {
+                            enodes.swap_remove(pos);
+                        }
+                        enodes.is_empty()
+                    }
+                    None => false,
+                }
             };
-            enodes.remove(&i);
-            if enodes.len() == 0 {
-                // last node with this index -> remove from map
+            if remove_entire {
                 self.edges.remove(&ix);
             }
         }
@@ -300,9 +315,9 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
             self.edges
                 .entry(*ix)
                 .and_modify(|nodes| {
-                    nodes.insert(i);
+                    if !nodes.contains(&i) { nodes.push(i); }
                 })
-                .or_insert(std::iter::once(i).collect());
+                .or_insert(vec![i]);
         }
         self.nodes.insert(i, legs);
         i
@@ -313,7 +328,15 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         let ilegs = self.pop_node(i);
         let jlegs = self.pop_node(j);
         if self.track_flops {
-            self.flops = ln_add(self.flops, compute_flops(&ilegs, &jlegs, &self.sizes));
+            let fl = compute_flops(&ilegs, &jlegs, &self.sizes);
+            self.flops = ln_add(self.flops, fl);
+            // track intermediate sizes (ln)
+            let new_legs = compute_legs(&ilegs, &jlegs, &self.appearances);
+            let interm_size = compute_size(&new_legs, &self.sizes);
+            self.total_intermediate_size_ln = ln_add(self.total_intermediate_size_ln, interm_size);
+            if interm_size > self.max_intermediate_size_ln {
+                self.max_intermediate_size_ln = interm_size;
+            }
         }
         let new_legs = compute_legs(&ilegs, &jlegs, &self.appearances);
         let k = self.add_node(new_legs);
@@ -326,7 +349,14 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         let ilegs = self.pop_node(i);
         let jlegs = self.pop_node(j);
         if self.track_flops {
-            self.flops = ln_add(self.flops, compute_flops(&ilegs, &jlegs, &self.sizes));
+            let fl = compute_flops(&ilegs, &jlegs, &self.sizes);
+            self.flops = ln_add(self.flops, fl);
+            // track intermediate sizes (ln)
+            let interm_size = compute_size(&new_legs, &self.sizes);
+            self.total_intermediate_size_ln = ln_add(self.total_intermediate_size_ln, interm_size);
+            if interm_size > self.max_intermediate_size_ln {
+                self.max_intermediate_size_ln = interm_size;
+            }
         }
         let k = self.add_node(new_legs);
         self.ssa_path.push(vec![i.as_(), j.as_()]);
@@ -535,6 +565,7 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
         }
 
         // greedily contract remaining
+        let mut steps: usize = 0;
         while let Some((_, c0)) = queue.pop() {
             let (i, j, ksize, klegs) = contractions.remove(&c0).unwrap();
             if !self.nodes.contains_key(&i) || !self.nodes.contains_key(&j) {
@@ -563,6 +594,22 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
                 queue.push((OrderedFloat(-score), c));
                 contractions.insert(c, (k, l, msize, mlegs));
                 c -= 1;
+            }
+
+            // periodically prune queue and contractions to remove stale entries
+            steps += 1;
+            if steps % 4096 == 0 {
+                let mut valid = Vec::new();
+                for (score, cid) in queue.drain() {
+                    if let Some((i, j, _, _)) = contractions.get(&cid) {
+                        if self.nodes.contains_key(&i) && self.nodes.contains_key(&j) {
+                            valid.push((score, cid));
+                        } else {
+                            contractions.remove(&cid);
+                        }
+                    }
+                }
+                queue = BinaryHeap::from(valid);
             }
 
             // // potential queue pruning?
@@ -967,9 +1014,9 @@ impl<Ix: IndexType, Node: NodeType> ContractionProcessor<Ix, Node> {
 // ----------------------- dispatch-able functions ------------------------- //
 
 fn run_find_subgraphs<Ix: IndexType, Node: NodeType>(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
 ) -> SSAPath {
     let cp: ContractionProcessor<Ix, Node> =
         ContractionProcessor::new(inputs, output, size_dict, false);
@@ -977,9 +1024,9 @@ fn run_find_subgraphs<Ix: IndexType, Node: NodeType>(
 }
 
 fn run_simplify<Ix: IndexType, Node: NodeType>(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
 ) -> SSAPath {
     let mut cp: ContractionProcessor<Ix, Node> =
         ContractionProcessor::new(inputs, output, size_dict, false);
@@ -988,9 +1035,9 @@ fn run_simplify<Ix: IndexType, Node: NodeType>(
 }
 
 fn run_greedy<Ix: IndexType, Node: NodeType>(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
     costmod: Option<f32>,
     temperature: Option<f32>,
     max_neighbors: Option<usize>,
@@ -1008,9 +1055,9 @@ fn run_greedy<Ix: IndexType, Node: NodeType>(
 }
 
 fn run_optimal<Ix: IndexType, Node: NodeType>(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
     minimize: Option<String>,
     cost_cap: Option<Score>,
     search_outer: Option<bool>,
@@ -1027,10 +1074,11 @@ fn run_optimal<Ix: IndexType, Node: NodeType>(
 }
 
 /// helper function for random greedy optimization with flop tracking
+#[allow(dead_code)]
 fn run_random_greedy_optimization<Ix: IndexType, Node: NodeType>(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
     simplify: bool,
     seeds: &[u64],
     costmod_min: f32,
@@ -1089,12 +1137,7 @@ fn run_random_greedy_optimization<Ix: IndexType, Node: NodeType>(
 
 // --------------------------- WOLFRAM FUNCTIONS ---------------------------- //
 
-use wolfram_library_link::{
-    self as wll,
-    DataStore, FromArg, sys::MArgument,
-    expr::{Expr, Number, Symbol}
-};
-use std::convert::TryInto;
+use wolfram_library_link as wll;
 
 
 wll::generate_loader!(load_wstp_functions);
@@ -1126,11 +1169,112 @@ fn ssa_to_linear(ssa_path: SSAPath, n: Option<usize>) -> SSAPath {
     path
 }
 
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn bench_user_dataset_costs() {
+        // Small example dataset using u32 labels directly
+        let inputs: Vec<Vec<u32>> = vec![
+            vec![3], vec![1], vec![4], vec![2], vec![5], vec![7,1,2],
+            vec![9,6,8,3,4,5], vec![10,11,6,7,8],
+            vec![12,13,14,16,15,9,10,11], vec![17,18,12,13,14,15],
+            vec![24,20,16], vec![19,17], vec![21,22,23,25,18,19,20],
+            vec![31,26,29,35,30,21,22,23,24,25], vec![27,26],
+            vec![28,27], vec![33,36,28,29,30], vec![32,34,31],
+            vec![37,38,39,32,33,34,35,36], vec![40,41,42,37],
+        ];
+
+        let output: Vec<u32> = vec![40,41,42,38,39];
+
+        let mut sizes: Dict<u32, f32> = Dict::default();
+        let sizes_list: &[(u32, i32)] = &[
+            (3,4),(1,4),(4,2),(2,4),(5,3),(7,4),(9,4),(6,2),(8,3),(10,4),(11,3),(12,4),(13,4),(14,2),(16,4),(15,3),(17,4),(18,4),(24,4),(20,3),(19,2),(21,4),(22,4),(23,2),(25,3),(31,4),(26,4),(29,2),(35,4),(30,3),(27,4),(28,4),(33,4),(36,3),(32,4),(34,2),(37,2),(38,4),(39,3),(40,4),(41,4),(42,2)
+        ];
+        for (k, v) in sizes_list.iter() { sizes.insert(*k, *v as f32); }
+
+        // We'll collect results and print an aligned ASCII table
+        struct Row {
+            method: &'static str,
+            minimize: String,
+            time_ms: f64,
+            flops: f32,
+            total_inter: f32,
+            max_inter: f32,
+            path: String,
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
+
+    // run greedy once and collect (use u32 index/node types)
+    let mut cp_g: ContractionProcessor<u32,u32> = ContractionProcessor::new(inputs.clone(), output.clone(), sizes.clone(), true);
+        cp_g.simplify();
+        let t0 = Instant::now();
+        let _ = cp_g.optimize_greedy(None, None, None, None);
+        cp_g.optimize_remaining_by_size();
+        let dt = t0.elapsed();
+    let greedy_flops = f32::exp(cp_g.flops);
+    let total_inter = f32::exp(cp_g.total_intermediate_size_ln);
+    let max_inter = if cp_g.max_intermediate_size_ln.is_finite() { f32::exp(cp_g.max_intermediate_size_ln) } else { 0.0 };
+        // obtain linear SSA path string for greedy
+        let greedy_path_ssa = ssa_to_linear(cp_g.ssa_path.clone(), Some(inputs.len()));
+        let greedy_path_str = format!("{:?}", greedy_path_ssa);
+        rows.push(Row {
+            method: "greedy",
+            minimize: "-".to_string(),
+            time_ms: dt.as_secs_f64() * 1000.0,
+            flops: greedy_flops,
+            total_inter: total_inter,
+            max_inter: max_inter,
+            path: greedy_path_str,
+        });
+
+        // try a few minimize options for optimal and collect
+        let minimizes: Vec<Option<String>> = vec![None, Some("flops".to_string()), Some("max".to_string()), Some("size".to_string()), Some("write".to_string()), Some("combo".to_string()), Some("limit-64".to_string())];
+        for m in minimizes.into_iter() {
+            let mut cp_o: ContractionProcessor<u32,u32> = ContractionProcessor::new(inputs.clone(), output.clone(), sizes.clone(), true);
+            cp_o.simplify();
+            let t1 = Instant::now();
+            cp_o.optimize_optimal(m.clone(), None, None);
+            cp_o.optimize_remaining_by_size();
+            let dt_o = t1.elapsed();
+            let opt_flops = f32::exp(cp_o.flops);
+            let total_inter_ln_o = cp_o.total_intermediate_size_ln;
+            let total_inter_o = f32::exp(total_inter_ln_o);
+            let max_inter_o = if cp_o.max_intermediate_size_ln.is_finite() { f32::exp(cp_o.max_intermediate_size_ln) } else { 0.0 };
+            let opt_path_ssa = ssa_to_linear(cp_o.ssa_path.clone(), Some(inputs.len()));
+            let opt_path_str = format!("{:?}", opt_path_ssa);
+            rows.push(Row {
+                method: "optimal",
+                minimize: match m.clone() { Some(s) => s, None => "None".to_string() },
+                time_ms: dt_o.as_secs_f64() * 1000.0,
+                flops: opt_flops,
+                total_inter: total_inter_o,
+                max_inter: max_inter_o,
+                path: opt_path_str,
+            });
+        }
+        // pretty-print table header and rows with fixed column widths
+        println!("{:<8} | {:<10} | {:>10} | {:>15} | {:>15} | {:>15} | {}",
+            "Method", "Minimize", "time_ms", "flops", "total_inter", "max_inter", "path");
+        // compute separator length from header string for robustness
+        let header = format!("{:<8} | {:<10} | {:>10} | {:>15} | {:>15} | {:>15} | {}",
+            "Method", "Minimize", "time_ms", "flops", "total_inter", "max_inter", "path");
+        println!("{}", "-".repeat(header.len()));
+        for r in rows.iter() {
+            println!("{:<8} | {:<10} | {:10.3} | {:15.0} | {:15.0} | {:15.0} | {}",
+                r.method, r.minimize, r.time_ms, r.flops, r.total_inter, r.max_inter, r.path);
+        }
+    }
+}
+
 #[wll::export]
 fn find_subgraphs(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
 ) -> SSAPath {
     let num_indices = size_dict.len();
     let max_nodes = 2 * inputs.len();
@@ -1151,9 +1295,9 @@ fn find_subgraphs(
 
 #[wll::export]
 fn optimize_simplify(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
     use_ssa: Option<bool>,
 ) -> SSAPath {
     let n = inputs.len();
@@ -1179,9 +1323,9 @@ fn optimize_simplify(
 
 #[wll::export]
 fn optimize_greedy(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
     costmod: Option<f32>,
     temperature: Option<f32>,
     max_neighbors: Option<usize>,
@@ -1241,9 +1385,9 @@ fn optimize_greedy(
 
 #[wll::export]
 fn optimize_optimal(
-    inputs: Vec<Vec<char>>,
-    output: Vec<char>,
-    size_dict: Dict<char, f32>,
+    inputs: Vec<Vec<u32>>,
+    output: Vec<u32>,
+    size_dict: Dict<u32, f32>,
     minimize: Option<String>,
     cost_cap: Option<Score>,
     search_outer: Option<bool>,

@@ -9,9 +9,9 @@ Run a release build for your host platform:
     cargo build --release
 
 Artifacts (in target/<triple>/release/):
-- Linux: libcontengrust.so
-- macOS: libcontengrust.dylib
-- Windows (MSVC): contengrust.dll
+- Linux: libcotengrust.so
+- macOS: libcotengrust.dylib
+- Windows (MSVC): cotengrust.dll
 
 ## Cross Compilation
 
@@ -29,9 +29,9 @@ Example (macOS arm64 from x86_64 host):
     cargo build --release --target aarch64-apple-darwin
     mkdir -p dist
         lipo -create \
-            target/x86_64-apple-darwin/release/libcontengrust.dylib \
-            target/aarch64-apple-darwin/release/libcontengrust.dylib \
-            -output dist/libcontengrust_universal.dylib
+            target/x86_64-apple-darwin/release/libcotengrust.dylib \
+            target/aarch64-apple-darwin/release/libcotengrust.dylib \
+            -output dist/libcotengrust_universal.dylib
 
 ### Linux aarch64 from x86_64 host
 
@@ -73,9 +73,9 @@ chmod +x scripts/package_macos.sh
 ./scripts/package_macos.sh
 ```
 
-This copies `target/release/libcontengrust.dylib` into the appropriate `Cotengra/LibraryResources/MacOSX-<arch>/` directory so the paclet can load it via `LibraryFunctionLoad` automatically.
+This copies `target/release/libcotengrust.dylib` into the appropriate `Cotengra/LibraryResources/MacOSX-<arch>/` directory so the paclet can load it via `LibraryFunctionLoad` automatically.
 
-For universal binaries, first lipo the two arch builds into `dist/libcontengrust_universal.dylib` and then copy that instead (renaming to `libcontengrust.dylib`).
+For universal binaries, first lipo the two arch builds into `dist/libcotengrust_universal.dylib` and then copy that instead (renaming to `libcotengrust.dylib`).
 
 
 Load the produced shared library with `LibraryFunctionLoad` to access the exported functions (annotated with `#[wll::export]`). Ensure Wolfram installation is discoverable for the build (override with `WOLFRAM_APPDIR` if necessary).
